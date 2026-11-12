@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path android:pathData="M0,0h320v180h-320z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="0"
+                android:endX="320"
+                android:endY="180"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#000000" />
+                <item android:offset="1.0" android:color="#1A1A1A" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- TV Play Emblem -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M60,56h76c4.4,0 8,3.6 8,8v48c0,4.4 -3.6,8 -8,8h-20v8h-36v-8h-20c-4.4,0 -8,-3.6 -8,-8V64C52,59.6 55.6,56 60,56zM60,112h76V64H60V112zM88,74l24,14l-24,14V74z" />
+    <!-- Accent Bar -->
+    <path
+        android:fillColor="#22C55E"
+        android:pathData="M164,70h4v40h-4z" />
+    <!-- Geometric ANISCROLL TV emblem bars -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M180,74h84v8h-84zM180,90h56v6h-56zM180,104h36v4h-36z" />
+</vector>

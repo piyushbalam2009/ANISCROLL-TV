@@ -1,0 +1,6 @@
+{
+  "name": "AniScroll TV",
+  "description": "Premium native Android TV, Google TV, and Fire TV anime streaming application powered by Hoshika metadata, AniScroll HLS streaming, and AniSkip.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

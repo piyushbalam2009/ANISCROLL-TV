@@ -1,0 +1,1933 @@
+# ANISCROLL TV — COMPLETE MASTER DEVELOPMENT PROMPT
+
+## 1. PROJECT IDENTITY
+
+Build a production-quality native Android TV anime streaming application named **AniScroll TV**.
+
+AniScroll TV is a premium anime streaming application designed primarily for television screens and remote controls.
+
+The application must support:
+- Android TV
+- Google TV
+- Amazon Fire TV
+- Compatible Android-based television boxes
+- NVIDIA Shield TV
+- Xiaomi Android TV devices
+
+This must be a real native Android application, not a website, PWA, WebView application, or mobile application stretched to television dimensions.
+
+### Branding
+
+- Application name: AniScroll TV
+- Package name: `in.aniscroll.tv`
+- Language: Kotlin
+- UI framework: Jetpack Compose for TV
+- Architecture: MVVM + Repository
+- Video player: AndroidX Media3 ExoPlayer
+- Database: Room
+- Preferences: DataStore
+- Networking: Retrofit + OkHttp
+- Image loading: Coil
+- Build system: Gradle Kotlin DSL
+
+The application must be designed for a 16:9 television display, primarily 1080p, with support for 4K displays.
+
+## 2. IMPORTANT DEVELOPMENT RULES
+
+Follow these rules throughout development:
+
+1. Build a genuine television application.
+2. Never design the interface primarily for touchscreens.
+3. Every interactive element must work using a television remote.
+4. Do not use the AniList API for metadata or any other purpose.
+5. Hoshika is the primary anime metadata provider.
+6. Use Hoshika's AniList ID mapping field only to obtain AniList IDs for the existing streaming API.
+7. Do not use TMDB or Fanart for metadata.
+8. TMDB and Fanart are exclusively for transparent anime title logos.
+9. Never use Hoshika's official streaming availability or watch functionality.
+10. Use the existing AniScroll backend for streaming.
+11. Use AniSkip for intro and outro skipping.
+12. User data must be stored locally.
+13. Do not require user registration or login.
+14. Do not expose API credentials in the Android application.
+15. Never fabricate API responses, streaming URLs, IDs, episodes, subtitles or artwork.
+16. Inspect actual API responses and documentation before implementing models.
+17. Do not replace real API integration with hardcoded demonstration data.
+18. Never remove working features when adding new features.
+
+If a requirement cannot be implemented in the current environment, explain the limitation and preserve the intended architecture.
+
+---
+
+# 3. TECHNOLOGY AND ARCHITECTURE
+
+Use the following technology stack:
+
+- Kotlin
+- Jetpack Compose for TV
+- AndroidX TV Material
+- AndroidX TV Foundation
+- AndroidX Navigation Compose
+- AndroidX Media3 ExoPlayer
+- Media3 HLS
+- Media3 UI
+- Retrofit
+- OkHttp
+- Kotlin Coroutines
+- Kotlin Flow
+- Room Database
+- DataStore Preferences
+- Coil 3
+- Hilt, if compatible with the project environment
+
+Use a single-activity architecture.
+
+Separate responsibilities into:
+- UI layer
+- ViewModels
+- Domain layer
+- Repository layer
+- Remote data sources
+- Local data sources
+- Player management
+- Navigation
+
+Use dependency injection and lifecycle-aware state management.
+
+Keep networking, database access and video playback outside composable UI functions.
+
+Use stable and compatible library versions. Verify dependency compatibility before updating Gradle.
+
+# 4. DESIGN SYSTEM
+
+## Overall visual direction
+
+Create a premium, minimalist, cinematic black-and-white anime streaming interface.
+
+Visual inspiration:
+- Netflix TV
+- Crunchyroll TV
+- Stremio TV
+
+Do not copy their exact layouts or branding.
+
+### Color palette
+
+- Main background: #000000
+- Secondary background: #0A0A0A
+- Card background: #151515
+- Elevated surface: #202020
+- Primary text: #FFFFFF
+- Secondary text: #A0A0A0
+- Muted text: #707070
+- Divider: #292929
+- Focus outline: #FFFFFF
+- Focus background: #FFFFFF
+- Focus text: #000000
+- Skip button accent: Green
+
+Avoid unnecessary colors.
+
+Use green only for meaningful player actions such as intro and outro skip buttons.
+
+### Typography
+
+Use a modern sans-serif font.
+
+Typography must be:
+- Readable from a television viewing distance
+- Properly scaled for 1080p and 4K
+- Consistent across every screen
+- Minimalist
+- Properly spaced
+
+### Focus animations
+
+Television navigation must have clear focus feedback.
+
+When a card receives focus:
+- Slightly increase its scale.
+- Display a clean white border or outline.
+- Keep animation smooth.
+- Avoid excessive shadows.
+- Do not cause surrounding content to jump.
+- Preserve focus when returning from another screen.
+
+Use appropriate focus states for:
+- Buttons
+- Anime cards
+- Navigation items
+- Episode cards
+- Settings
+- Player controls
+- Dialogs
+
+Every screen must have a visible focus target.
+
+---
+
+# 5. TV REMOTE NAVIGATION
+
+This is one of the most important requirements.
+
+Implement complete D-pad navigation.
+
+Supported buttons:
+- UP
+- DOWN
+- LEFT
+- RIGHT
+- CENTER / ENTER
+- BACK
+- MENU, when available
+- PLAY / PAUSE, when available
+- MEDIA NEXT / PREVIOUS, when available
+
+### Navigation logic
+
+UP and DOWN:
+- Navigate between vertically stacked sections.
+- Navigate between navigation items.
+- Move between rows and content sections.
+
+LEFT and RIGHT:
+- Navigate horizontally between cards.
+- Navigate between buttons.
+- Navigate through episode lists.
+- Navigate through player controls.
+
+CENTER:
+- Open selected anime.
+- Activate the selected button.
+- Start playback when the selected action is Play.
+
+BACK:
+- Close dialogs first.
+- Return from anime details to the previous screen.
+- Return from search to home.
+- Hide player controls before exiting playback.
+- Exit the application only when appropriate.
+
+### Focus preservation
+
+When opening anime details and returning home:
+- Restore the previous focused anime card.
+- Restore the previous scroll position.
+
+When opening an episode list and returning:
+- Restore the selected episode.
+
+When closing settings:
+- Restore the previous settings selection.
+
+Do not allow focus to disappear into an inaccessible area.
+
+Implement proper focus groups and focus requesters.
+
+Do not depend on touch gestures.
+
+---
+
+# 6. APPLICATION NAVIGATION
+
+Create a permanent TV navigation sidebar.
+
+Navigation items:
+
+1. Home
+2. Search
+3. Discover
+4. Schedule
+5. My List
+6. Continue Watching
+7. Settings
+
+### Sidebar design
+
+- Initially compact.
+- Expand when focused or selected.
+- Use minimal white icons.
+- Show labels when expanded.
+- Maintain a black background.
+- Use a subtle focus animation.
+- Keep navigation consistent across all major screens.
+
+The Home screen should open automatically when the application launches.
+
+Remember the last meaningful application state locally where appropriate.
+
+---
+
+# 7. HOSHIKA API — PRIMARY METADATA PROVIDER
+
+Hoshika is the exclusive primary anime metadata source.
+
+Official documentation:
+
+https://hoshika.app/developers
+
+Base API URL:
+
+https://hoshika.app/api/v1
+
+Before implementing the API client:
+
+1. Read the current official Hoshika documentation.
+2. Inspect available endpoints.
+3. Inspect actual response structures.
+4. Identify pagination rules.
+5. Identify artwork fields.
+6. Identify episode fields.
+7. Identify cross-reference ID fields.
+8. Implement correct DTOs.
+9. Handle nullable fields.
+10. Do not invent endpoint parameters or response properties.
+
+### Hoshika responsibilities
+
+Use Hoshika for:
+- Home recommendations, when provided
+- Anime discovery
+- Search
+- Anime details
+- Anime titles
+- English titles
+- Japanese titles
+- Descriptions
+- Genres
+- Release year
+- Season
+- Status
+- Episode information, when available
+- Episode lists
+- Anime posters
+- Anime banners
+- Schedule
+- Trending anime
+- Popular anime
+- Catalogue browsing
+
+Use its supported endpoints according to the documentation.
+
+Potential documented operations include:
+- Home
+- Search
+- Catalogue
+- Anime details
+- Anime episodes
+- Browse
+- Season
+- Schedule
+- Genres
+- Genre catalogue
+
+Do not assume that a particular endpoint exists or that its parameters are unchanged. Verify everything against the current documentation.
+
+### Hoshika artwork rules
+
+Use Hoshika artwork for:
+- Anime posters
+- Anime covers
+- Anime banners
+- Anime backgrounds
+
+Do not replace Hoshika metadata artwork with TMDB artwork.
+
+TMDB and Fanart are reserved exclusively for transparent title logos.
+
+### Hoshika API security
+
+Hoshika credentials must never be embedded in:
+- Kotlin files
+- BuildConfig
+- Android resources
+- APK assets
+- Public configuration files
+
+Use the existing AniScroll backend as a secure proxy where Hoshika authentication requires private credentials.
+
+If the existing backend does not expose the necessary Hoshika operations, create the required server-side routes in the existing backend project.
+
+Never expose private credentials to the client.
+
+### Hoshika error handling
+
+Handle:
+- Network timeout
+- Invalid response
+- Rate limiting
+- Missing anime
+- Missing artwork
+- Missing episodes
+- Server errors
+- Authentication errors
+
+Show appropriate loading, error and empty states.
+
+---
+
+# 8. HOSHIKA ID TO ANILIST ID CONVERTER
+
+This is a critical feature.
+
+Hoshika uses its own anime identifier.
+
+The AniScroll streaming API requires an AniList ID.
+
+Create a dedicated ID conversion system.
+
+### Required class
+
+`HoshikaIdConverter.kt`
+
+### Conversion flow
+
+1. User opens an anime from Hoshika.
+2. Obtain its Hoshika `shortId`.
+3. Check the local mapping database.
+4. If a valid mapping exists, use it.
+5. Otherwise request the Hoshika anime details or the documented cross-reference mapping.
+6. Extract the corresponding `anilist_id` field when available.
+7. Validate the ID.
+8. Save the mapping in Room.
+9. Return the AniList ID.
+10. Pass that ID to the AniScroll streaming API.
+
+### Important restriction
+
+DO NOT use the AniList API to perform this conversion.
+
+Do not make GraphQL requests to AniList.
+
+Do not create an independent AniList metadata integration.
+
+Use only the ID mapping information supplied by Hoshika or another explicitly documented Hoshika cross-reference mechanism.
+
+### Data model
+
+Create:
+
+`AnimeIdMapping.kt`
+
+Properties:
+- hoshikaId: Long
+- anilistId: Long
+- lastUpdated: Long
+
+### Room table
+
+Create a table named `anime_id_mappings`.
+
+Suggested schema:
+
+- hoshika_id: Primary Key
+- anilist_id: Long
+- last_updated: Long
+
+### Converter logic
+
+Pseudo-code:
+
+    suspend fun convert(hoshikaId: Long): Long? {
+        val cached = dao.getMapping(hoshikaId)
+
+        if (cached != null && cached.anilistId > 0) {
+            return cached.anilistId
+        }
+
+        val anime = hoshikaRepository.getAnime(hoshikaId)
+
+        val anilistId = anime.anilistId
+            ?.takeIf { it > 0 }
+            ?: return null
+
+        dao.insertMapping(
+            AnimeIdMapping(
+                hoshikaId = hoshikaId,
+                anilistId = anilistId,
+                lastUpdated = currentTimeMillis()
+            )
+        )
+
+        return anilistId
+    }
+
+This is the intended logic. Adapt it to the actual Hoshika response schema.
+
+### Mapping failures
+
+If Hoshika does not provide an AniList ID:
+- Do not guess.
+- Do not send the Hoshika ID to the streaming API.
+- Do not match titles blindly.
+- Do not start a streaming request with an invalid ID.
+- Display a useful unavailable-source message.
+
+### Multiple mapping sources
+
+If Hoshika provides multiple IDs, use the actual AniList mapping field, not MAL ID or Hoshika ID.
+
+Never confuse:
+- Hoshika ID
+- AniList ID
+- MAL ID
+- TMDB ID
+
+All identifiers must be stored and passed separately.
+
+---
+
+# 9. TMDB TITLE LOGO INTEGRATION
+
+TMDB is exclusively for retrieving transparent anime title logos.
+
+Official documentation:
+
+https://developer.themoviedb.org/docs/getting-started
+
+Do not use TMDB for:
+- Anime metadata
+- Descriptions
+- Ratings
+- Genres
+- Episodes
+- Season information
+- Search results displayed to users
+- Streaming information
+- Posters
+- Banners
+
+Use it only to retrieve transparent anime title logos.
+
+### TMDB workflow
+
+Step 1: Obtain the anime title and release year from Hoshika.
+
+Step 2: Search for the corresponding TV series using TMDB TV search.
+
+Step 3: Compare:
+- English title
+- Original title
+- Alternative title, when available
+- Release year
+- Original language
+
+Step 4: Verify the result matches the Hoshika anime.
+
+Step 5: Obtain the TMDB TV ID.
+
+Step 6: Request TV images and inspect the `logos` collection.
+
+Step 7: Select the most suitable transparent logo.
+
+### Image endpoint
+
+Use the official TMDB TV images endpoint:
+
+`/tv/{tv_id}/images`
+
+Use supported image-language filters.
+
+Prioritize:
+1. English logo
+2. Japanese logo
+3. Language-neutral logo
+4. Other suitable logo only if necessary
+
+### Image URL
+
+Use the TMDB image CDN:
+
+`https://image.tmdb.org/t/p/original/{file_path}`
+
+Use original resolution when appropriate.
+
+### Logo validation
+
+- Prefer PNG with transparency.
+- Prefer large-resolution artwork.
+- Preserve aspect ratio.
+- Do not stretch.
+- Avoid logos with excessive empty space when a better version exists.
+- Reject unrelated artwork.
+- Never display a poster as a title logo.
+
+### TMDB match validation
+
+Do not blindly accept the first search result.
+
+Use title and year matching to prevent different anime adaptations or similarly named series from receiving the wrong logo.
+
+When confidence is insufficient, try alternative Hoshika title fields.
+
+If still uncertain, continue to Fanart.tv.
+
+---
+
+# 10. FANART.TV TITLE LOGO FALLBACK
+
+Official documentation:
+
+https://api.fanart.tv/
+
+Fanart.tv is the secondary logo provider.
+
+Only call it when:
+- TMDB has no suitable logo.
+- TMDB returns no logos.
+- The matching TV entry has no usable logo.
+- The logo URL is invalid or unavailable.
+
+Use the corresponding TMDB TV ID as the lookup reference, following Fanart.tv documentation.
+
+Use the supported TV logo artwork collection, especially `hdtvlogo`.
+
+### Selection priority
+
+1. English logo
+2. Japanese logo
+3. Language-neutral logo
+4. Other suitable logo
+
+Check image validity and transparency where possible.
+
+Do not replace a valid TMDB logo with a lower-quality Fanart logo.
+
+### Fallback sequence
+
+    Hoshika anime title
+          |
+          v
+    TMDB search
+          |
+          v
+    Verify matching TV series
+          |
+          v
+    TMDB logos
+          |
+       Found?
+       /    \
+     Yes     No
+      |       |
+      v       v
+    Display  Fanart.tv
+             |
+          Logo found?
+           /     \
+         Yes      No
+          |        |
+          v        v
+       Display   Text title
+
+### Final fallback
+
+If neither TMDB nor Fanart has a valid logo:
+- Display the English anime title.
+- If English title is unavailable, display the preferred Hoshika title.
+- Use clean white typography.
+- Do not show an empty image.
+- Do not show a broken image placeholder.
+
+### Logo cache
+
+Store:
+- Hoshika ID
+- TMDB TV ID
+- Logo provider
+- Logo URL
+- Logo language
+- Width
+- Height
+- Last updated
+- Validation status
+
+Cache the selected logo locally.
+
+Do not perform logo searches every time a user opens anime details.
+
+Use reasonable cache expiration and allow refreshing missing or invalid artwork.
+
+### API security
+
+TMDB API credentials and Fanart.tv API keys must remain on the backend.
+
+Never hardcode these credentials in the APK.
+
+Use the existing AniScroll backend as the secure proxy.
+
+---
+
+# 11. HOME SCREEN
+
+Create a premium cinematic TV home screen.
+
+### Hero section
+
+At the top, display a featured anime.
+
+Include:
+- Wide Hoshika background artwork
+- Dark gradient overlay
+- Transparent title logo from TMDB or Fanart
+- Anime description
+- Release year
+- Genres
+- Status
+- Play button
+- Details button
+- Add to My List button
+
+Use the transparent title logo instead of ordinary text whenever available.
+
+The logo must preserve its original aspect ratio.
+
+Do not stretch the logo to fit a fixed box.
+
+### Home content rows
+
+Create these sections when supported by Hoshika:
+
+1. Continue Watching
+2. Trending Anime
+3. Popular Anime
+4. Recently Updated
+5. Currently Airing
+6. Upcoming Anime
+7. Recommended Anime
+8. Action
+9. Adventure
+10. Fantasy
+11. Isekai
+12. Romance
+13. Comedy
+
+Do not display fake content if an endpoint returns empty data.
+
+Only display categories supported by the actual API.
+
+### Anime cards
+
+Every anime card should contain:
+- Hoshika poster
+- Anime title
+- Optional episode status
+- Optional format or season information
+
+Use a consistent poster aspect ratio.
+
+Cards must support remote focus and selection.
+
+When focused:
+- Scale slightly.
+- Display a white focus outline.
+- Animate smoothly.
+- Do not disturb surrounding layout.
+
+---
+
+# 12. ANIME DETAILS SCREEN
+
+When a user selects an anime, open a dedicated details screen.
+
+### Layout
+
+Use:
+- Wide background artwork
+- Dark gradient
+- Anime title logo
+- Anime poster
+- English title
+- Japanese title, if available
+- Description
+- Release year
+- Genres
+- Format
+- Status
+- Total episodes, when known
+
+### Action buttons
+
+1. Play
+2. Resume
+3. Episodes
+4. Add to My List
+
+### Description
+
+Support long descriptions.
+
+Allow scrolling with the remote.
+
+### Episode information
+
+Use Hoshika's actual episode information.
+
+Do not invent episode counts or episode titles.
+
+### Missing metadata
+
+If optional information is unavailable, hide that section cleanly.
+
+---
+
+# 13. SEARCH
+
+Create a complete TV search experience.
+
+### Search requirements
+
+- Television-friendly on-screen keyboard.
+- Remote navigation between letters.
+- Search button.
+- Clear search.
+- Search history stored locally.
+- Recent searches.
+- Loading state.
+- No-results state.
+- Network error state.
+
+Use Hoshika search functionality.
+
+Do not use AniList search.
+
+### Search results
+
+Display:
+- Hoshika poster
+- Anime title
+- Year, if available
+- Status, if available
+
+Results must support remote navigation.
+
+Debounce requests.
+
+Cancel outdated searches when the query changes.
+
+Do not make unnecessary API calls.
+
+---
+
+# 14. DISCOVER SCREEN
+
+Create a dedicated anime discovery screen.
+
+Include:
+- Trending
+- Popular
+- Latest
+- Upcoming
+- Genres
+- Seasonal anime
+
+Use only categories and filters supported by Hoshika.
+
+### Genre filtering
+
+Allow users to browse:
+- Action
+- Adventure
+- Comedy
+- Drama
+- Fantasy
+- Isekai
+- Romance
+- Sci-Fi
+- Supernatural
+- Thriller
+
+Use the actual genre identifiers or slugs returned by Hoshika.
+
+Support pagination or load-more behaviour.
+
+---
+
+# 15. ANIME SCHEDULE
+
+Create a television-friendly schedule page.
+
+Use Hoshika's documented schedule API.
+
+Display:
+- Day
+- Anime title
+- Poster
+- Episode number, if provided
+- Airing time, if provided
+- Release status
+
+Convert times to the device's local timezone when the API supplies a valid timezone or timestamp.
+
+Do not fabricate airing times.
+
+Use horizontal day navigation.
+
+Allow opening anime details from schedule entries.
+
+---
+
+# 16. MY LIST
+
+Create a local favourites/watchlist feature.
+
+Users can add and remove anime without creating accounts.
+
+Store:
+- Hoshika ID
+- Anime title
+- Poster URL
+- Logo URL, if available
+- Date added
+
+Use Room Database.
+
+The My List screen must work offline using saved information.
+
+---
+
+# 17. CONTINUE WATCHING
+
+Create a Continue Watching section.
+
+Store:
+- Hoshika ID
+- AniList ID
+- Episode number
+- SUB/DUB selection
+- Current playback position
+- Total duration
+- Last watched timestamp
+- Anime title
+- Poster URL
+- Logo URL, if available
+
+### Resume logic
+
+When a user starts playback:
+- Save progress periodically.
+- Save when playback pauses.
+- Save when playback exits.
+- Save when the application enters the background.
+- Resume from the saved position.
+
+Do not save a completed episode as an incomplete episode.
+
+When an episode is nearly completed, mark it completed and update the next-episode state.
+
+Use a sensible completion threshold, such as 90%.
+
+Allow users to remove individual items from Continue Watching.
+
+---
+
+# 18. VIDEO PLAYER — ANDROIDX MEDIA3 EXOPLAYER
+
+Build a premium native video player.
+
+Use:
+- AndroidX Media3 ExoPlayer
+- Media3 HLS module
+- Appropriate Media3 UI integration
+
+Do not use an HTML video player.
+
+Do not use a WebView.
+
+### Streaming endpoint
+
+Use the existing AniScroll backend:
+
+GET
+
+`https://api.aniscroll.in/api/watch/zokoanime/{anilist_id}/{episode}/{sub|dub}`
+
+Example:
+
+`https://api.aniscroll.in/api/watch/zokoanime/1535/1/sub`
+
+The AniList ID must always come from the Hoshika ID Converter.
+
+Never pass the Hoshika ID directly to this endpoint.
+
+### Playback flow
+
+1. User selects an anime.
+2. User selects an episode.
+3. Retrieve the Hoshika ID.
+4. Convert Hoshika ID to AniList ID.
+5. Validate the mapping.
+6. Call the AniScroll streaming endpoint.
+7. Parse the actual JSON response.
+8. Identify available HLS sources and qualities.
+9. Select the best playable stream.
+10. Initialize Media3 ExoPlayer.
+11. Load HLS.
+12. Load available subtitle tracks.
+13. Start playback.
+
+### API response handling
+
+Inspect actual AniScroll API responses before defining DTOs.
+
+Do not assume:
+- JSON property names
+- HLS URL fields
+- Quality formats
+- Subtitle structures
+- Headers
+- Source names
+
+Support the real response format.
+
+### HLS playback
+
+Support:
+- HLS master playlists
+- Adaptive bitrate playback
+- Available resolutions
+- Buffering states
+- Network errors
+- Playback errors
+- Stream retries
+
+Do not force 1080p when unavailable.
+
+Allow adaptive quality.
+
+### Quality selector
+
+Provide:
+- Auto
+- Available 360p
+- Available 480p
+- Available 720p
+- Available 1080p
+- Other qualities actually returned by the API
+
+Only display available qualities.
+
+### Player controls
+
+Create custom television-friendly controls.
+
+Include:
+- Play/Pause
+- Seek backward
+- Seek forward
+- Progress bar
+- Current time
+- Remaining time
+- Episode title
+- Previous episode
+- Next episode
+- Subtitle selection
+- Audio track selection
+- Quality selection
+- Playback settings
+
+### Progress bar
+
+The progress bar must be thin and minimalist.
+
+Do not use an excessively tall progress bar.
+
+Use a compact television-friendly control area.
+
+Show buffering separately.
+
+### Player control visibility
+
+- Controls appear when the user presses a remote button.
+- Controls automatically hide after inactivity.
+- Video continues playing while controls are hidden.
+- Pressing Back hides controls first.
+- A subsequent Back action returns to the previous screen.
+
+---
+
+# 19. INTRO AND OUTRO SKIP — ANISKIP
+
+Integrate AniSkip v2.
+
+Use the AniList ID from the Hoshika ID Converter.
+
+Do not use the Hoshika ID for AniSkip.
+
+Use the documented AniSkip API and inspect its response structure.
+
+Retrieve intro and outro timestamps for the current episode.
+
+### Skip logic
+
+When playback reaches the intro start:
+- Show a Skip Intro button.
+
+When playback reaches the outro start:
+- Show a Skip Outro button.
+
+When the skip action is pressed:
+- Seek to the corresponding end timestamp.
+- Hide the button.
+- Continue playback.
+
+If no timestamps are available:
+- Do not show a skip button.
+
+Do not display a skip button for invalid timestamps.
+
+Avoid repeatedly showing the same skip button after seeking.
+
+### Skip button design
+
+- Position on the RIGHT SIDE of the player.
+- Use a minimal transparent/invisible button style.
+- Green text or subtle green accent.
+- No large solid background.
+- No unnecessary shadow.
+- Compact size.
+- Clear remote focus indication.
+
+Example:
+
+`Skip Intro  >>`
+
+The button should feel like a subtle overlay, not a large menu.
+
+### Timing behaviour
+
+The skip button must:
+- Appear only during the valid timestamp interval.
+- Disappear when the interval ends.
+- Disappear after successful skipping.
+- Avoid showing both Intro and Outro simultaneously.
+- Respect the user's manual seeking.
+
+Provide sensible handling for unavailable AniSkip results and network errors.
+
+---
+
+# 20. SUBTITLE CUSTOMIZATION
+
+Build a complete subtitle settings interface.
+
+### Subtitle features
+
+- Enable/disable subtitles
+- Subtitle language selection
+- Subtitle track selection
+- Subtitle size
+- Subtitle colour
+- Subtitle background
+- Background opacity
+- Subtitle outline
+- Subtitle position
+
+### Size presets
+
+- Small
+- Medium
+- Large
+- Extra Large
+
+### Colour options
+
+- White
+- Yellow
+- Cyan
+- Green
+
+### Background options
+
+- Transparent
+- Semi-transparent black
+- Solid black
+
+### Position
+
+- Bottom
+- Lower-middle
+
+### Behaviour
+
+- Save preferences locally.
+- Apply settings immediately.
+- Preserve preferences across episodes.
+- Respect available subtitle tracks.
+- Do not display unavailable subtitle languages.
+
+Support both embedded subtitles and external subtitle tracks when returned by the streaming source and supported by Media3.
+
+Make sure subtitle styling works correctly with the selected rendering mode.
+
+---
+
+# 21. SUB/DUB SELECTION
+
+Allow the user to select:
+
+- SUB
+- DUB
+
+Use the exact language parameter expected by the AniScroll backend.
+
+When switching:
+1. Preserve the current anime.
+2. Preserve the current episode.
+3. Request the selected language.
+4. Load the new stream.
+5. Restore playback position when possible.
+
+If a requested language is unavailable, show an appropriate message.
+
+Never pretend that a dub source exists when the API does not return one.
+
+---
+
+# 22. AUTO NEXT EPISODE
+
+Implement automatic next-episode playback.
+
+When the current episode finishes:
+- Identify the next episode.
+- Check whether it exists.
+- Display a Next Episode overlay.
+- Provide a countdown.
+- Automatically play after the countdown.
+- Allow cancel.
+- Allow Play Now.
+
+Use Hoshika episode information.
+
+Do not assume episode numbers are always consecutive.
+
+Do not automatically generate episode numbers when the API does not confirm them.
+
+### Episode navigation
+
+Support:
+- Previous episode
+- Next episode
+- Episode selection
+
+Preserve the current playback state where possible.
+
+---
+
+# 23. EPISODE LIST
+
+Create an episode browsing screen.
+
+Display:
+- Episode number
+- Episode title, if available
+- Thumbnail, if available
+- Watched status
+- Currently playing status
+
+Use Hoshika episode information.
+
+If thumbnails are unavailable, use a consistent fallback layout.
+
+Allow users to:
+- Select an episode.
+- Resume the last watched episode.
+- Navigate between episodes.
+- Identify completed episodes.
+
+Support long episode lists and pagination.
+
+---
+
+# 24. SETTINGS SCREEN
+
+Create a television-friendly settings page.
+
+### General
+
+- Application version
+- About AniScroll TV
+- Clear image cache
+- Clear search history
+- Clear watch history
+
+### Playback
+
+- Default playback quality
+- Default language: SUB/DUB
+- Auto next episode
+- Skip intro automatically, if supported by the selected implementation
+- Resume playback
+
+### Subtitles
+
+- Subtitle size
+- Subtitle colour
+- Background
+- Opacity
+- Position
+
+### Storage
+
+- Database information
+- Cache usage
+- Clear cache
+- Clear local data
+
+Before destructive actions, display a confirmation dialog.
+
+---
+
+# 25. LOCAL DATABASE
+
+No mandatory account system.
+
+Use Room Database for persistent data.
+
+Create entities for:
+
+### AnimeEntity
+- hoshikaId
+- title
+- englishTitle
+- japaneseTitle
+- posterUrl
+- bannerUrl
+- logoUrl
+- tmdbId
+- lastUpdated
+
+### AnimeIdMappingEntity
+- hoshikaId
+- anilistId
+- lastUpdated
+
+### WatchHistoryEntity
+- hoshikaId
+- anilistId
+- episodeNumber
+- language
+- position
+- duration
+- completed
+- lastWatched
+
+### WatchlistEntity
+- hoshikaId
+- addedAt
+
+### LogoCacheEntity
+- hoshikaId
+- tmdbId
+- provider
+- logoUrl
+- language
+- width
+- height
+- lastUpdated
+
+### SearchHistoryEntity
+- query
+- timestamp
+
+Use DataStore for:
+- Default quality
+- Preferred language
+- Subtitle preferences
+- Autoplay settings
+- Skip preferences
+- Other application settings
+
+Do not store private API credentials in Room or DataStore.
+
+---
+
+# 26. NETWORKING AND CACHING
+
+Create separate API clients and repositories.
+
+Suggested modules:
+
+- HoshikaApi
+- AniScrollApi
+- AniSkipApi
+- LogoRepository
+- AnimeRepository
+- PlaybackRepository
+- AnimeMappingRepository
+
+### Networking
+
+Use:
+- Retrofit
+- OkHttp
+- Kotlin Coroutines
+- Structured concurrency
+- Proper timeout configuration
+- Request cancellation
+- Error mapping
+
+### Caching strategy
+
+Cache:
+- Anime details
+- Anime ID mappings
+- Title logos
+- Watch history
+- My List
+- Search history
+
+Avoid unnecessary API requests.
+
+Do not cache temporary streaming URLs indefinitely.
+
+Refresh expired or invalid stream information.
+
+Provide graceful offline behaviour for locally cached information.
+
+### Retry logic
+
+Use bounded retries with exponential backoff for appropriate transient network failures.
+
+Do not endlessly retry:
+- Invalid IDs
+- Missing anime
+- Missing logos
+- Unsupported quality
+- Permanent authentication errors
+
+---
+
+# 27. BACKEND AND API SECURITY
+
+Existing backend:
+
+`https://api.aniscroll.in`
+
+Use this backend for existing AniScroll streaming functionality.
+
+Inspect the existing API structure before creating new routes.
+
+Do not break existing routes.
+
+### Backend responsibilities
+
+Where necessary, implement secure proxy endpoints for:
+- Hoshika authenticated requests
+- TMDB logo search
+- TMDB TV image lookup
+- Fanart.tv fallback
+
+Keep API keys server-side.
+
+Never embed:
+- Hoshika credentials
+- TMDB API credentials
+- Fanart.tv API key
+
+inside the Android APK.
+
+Use environment variables on the backend.
+
+If a backend endpoint does not exist, implement it in the existing Next.js backend project only after inspecting the existing repository structure and conventions.
+
+Do not invent successful responses.
+
+### Important service separation
+
+Hoshika:
+Anime metadata.
+
+AniScroll:
+Streaming sources.
+
+AniSkip:
+Intro/outro timestamps.
+
+TMDB:
+Title logos only.
+
+Fanart.tv:
+Fallback title logos only.
+
+Room:
+Local user information.
+
+DataStore:
+Local settings.
+
+---
+
+# 28. ANDROID TV AND FIRE TV COMPATIBILITY
+
+The application must be compatible with Android TV and Google TV devices, with Amazon Fire TV compatibility as a major requirement.
+
+### Manifest requirements
+
+Configure:
+- Internet permission
+- TV launcher category
+- Leanback support
+- Appropriate application icon
+- TV banner
+- Landscape orientation
+- Correct activity configuration
+- Appropriate hardware feature declarations
+
+Declare TV hardware as optional where necessary so compatible Fire TV and other Android-based devices are not unnecessarily excluded.
+
+Do not require touchscreen hardware.
+
+Configure application intent filters correctly.
+
+### Google TV and Android TV
+
+Support:
+- Android TV launcher
+- Remote control
+- TV navigation
+- Large screen layout
+- TV-compatible typography
+- Proper focus behaviour
+
+### Amazon Fire TV
+
+Do not depend on Google Play Services for essential features.
+
+Avoid Google-specific APIs unless genuinely required.
+
+Use standard Android APIs where possible.
+
+Ensure:
+- Remote navigation works.
+- Playback works without Google Play Services.
+- Local storage works.
+- Networking works.
+- App launcher assets are correct.
+
+Do not claim Fire TV certification without testing on actual hardware.
+
+---
+
+# 29. PERFORMANCE AND MEMORY
+
+Optimize for low-memory Android TV devices.
+
+Requirements:
+- Avoid loading too many high-resolution images simultaneously.
+- Use image caching.
+- Use lazy lists.
+- Avoid unnecessary recompositions.
+- Avoid leaking ExoPlayer instances.
+- Release the player appropriately.
+- Cancel obsolete network requests.
+- Preserve UI state.
+- Avoid blocking the main thread.
+- Handle background and foreground transitions.
+- Handle process recreation.
+
+Use image resizing where appropriate.
+
+Do not load original-resolution artwork when a smaller image is sufficient.
+
+Use a shared and properly managed player lifecycle.
+
+---
+
+# 30. ERROR AND EMPTY STATES
+
+Implement professional error handling.
+
+Examples:
+
+### Network unavailable
+Display:
+"Unable to connect. Check your internet connection."
+
+### Anime not found
+Display:
+"Anime information is unavailable."
+
+### ID mapping unavailable
+Display:
+"Unable to find a compatible streaming ID for this anime."
+
+### No stream
+Display:
+"No playable streaming source was found."
+
+### Logo unavailable
+Display the anime title in clean typography.
+
+### Subtitle unavailable
+Display:
+"No subtitles available."
+
+### AniSkip unavailable
+Continue playback without a skip button.
+
+### Hoshika API failure
+Show cached data when possible.
+
+All errors must be understandable to ordinary users.
+
+Do not show raw JSON or technical stack traces in the UI.
+
+---
+
+# 31. APPLICATION VISUAL QUALITY
+
+The application should look like a polished commercial TV streaming service.
+
+Avoid:
+- Generic mobile cards
+- Oversized rounded rectangles
+- Excessive gradients
+- Excessive borders
+- Too many colors
+- Small typography
+- Dense layouts
+- Unnecessary animations
+- Touchscreen-oriented controls
+- Placeholder content in production
+
+Use cinematic spacing.
+
+Make artwork the primary visual element.
+
+Keep the interface uncluttered.
+
+Use transparent title logos on hero and details screens.
+
+Maintain consistent black-and-white branding.
+
+---
+
+# 32. TESTING REQUIREMENTS
+
+Before considering development complete, test:
+
+### Navigation
+- D-pad navigation
+- Focus restoration
+- Back button
+- Dialog navigation
+- Sidebar navigation
+- Episode navigation
+
+### Metadata
+- Hoshika home
+- Search
+- Details
+- Episodes
+- Schedule
+- Genre browsing
+
+### ID conversion
+- Valid mapping
+- Cached mapping
+- Missing mapping
+- Invalid mapping
+- Network error
+- Mapping persistence
+
+### Logos
+- TMDB success
+- TMDB no logo
+- Fanart fallback
+- Fanart failure
+- Invalid logo
+- Text fallback
+- Cache behaviour
+
+### Playback
+- HLS playback
+- Quality switching
+- SUB/DUB switching
+- Seeking
+- Pause/resume
+- Playback restoration
+- Subtitle rendering
+- Intro skipping
+- Outro skipping
+- Next episode
+- Network interruptions
+
+### Local storage
+- Watch history
+- Continue Watching
+- My List
+- Settings
+- App restart persistence
+
+### Device compatibility
+- Android TV emulator
+- Google TV
+- Fire TV device
+- Low-memory device
+- 1080p television
+- 4K television
+
+---
+
+# 33. PROJECT STRUCTURE
+
+Use a maintainable structure similar to:
+
+AniScrollTV/
+
+app/
+
+src/main/
+
+java/in/aniscroll/tv/
+
+MainActivity.kt
+
+core/
+- network/
+- database/
+- datastore/
+- designsystem/
+- common/
+- util/
+
+data/
+- remote/
+- local/
+- repository/
+- model/
+
+domain/
+- model/
+- repository/
+- converter/
+- usecase/
+
+navigation/
+
+features/
+- home/
+- search/
+- discover/
+- schedule/
+- details/
+- episodes/
+- watchlist/
+- history/
+- settings/
+
+player/
+- ExoPlayerManager.kt
+- PlaybackController.kt
+- SubtitleManager.kt
+- QualityManager.kt
+- AniSkipManager.kt
+- NextEpisodeManager.kt
+
+artwork/
+- TmdbLogoProvider.kt
+- FanartLogoProvider.kt
+- LogoRepository.kt
+
+di/
+
+res/
+- drawable/
+- mipmap/
+- values/
+
+AndroidManifest.xml
+
+Use sensible package names and avoid placing the entire application in one Kotlin file.
+
+---
+
+# 34. DEVELOPMENT PHASES
+
+Implement the project in the following order.
+
+## PHASE 1 — PROJECT FOUNDATION
+
+- Create the native Android project.
+- Configure Gradle.
+- Configure Kotlin.
+- Configure Compose.
+- Configure TV dependencies.
+- Configure AndroidManifest.xml.
+- Set up theme.
+- Set up navigation.
+- Set up networking.
+- Set up Room.
+- Set up DataStore.
+
+Deliverable: A working Android TV application that launches successfully.
+
+## PHASE 2 — DESIGN AND NAVIGATION
+
+- Create sidebar.
+- Create Home screen.
+- Create anime cards.
+- Create horizontal rows.
+- Create focus animations.
+- Create D-pad navigation.
+- Create screen transitions.
+
+Deliverable: Complete TV interface with realistic layouts.
+
+## PHASE 3 — HOSHIKA
+
+- Read official API documentation.
+- Implement API client.
+- Implement data models.
+- Implement repository.
+- Implement Home.
+- Implement Search.
+- Implement Details.
+- Implement Episodes.
+- Implement Discover.
+- Implement Schedule.
+
+Deliverable: Real anime data from Hoshika.
+
+## PHASE 4 — ID CONVERTER
+
+- Implement Hoshika ID converter.
+- Read AniList ID mapping from Hoshika.
+- Implement Room cache.
+- Validate IDs.
+- Handle missing mappings.
+
+Deliverable: Reliable Hoshika-to-AniList ID conversion without calling AniList.
+
+## PHASE 5 — TITLE LOGOS
+
+- Implement TMDB TV search.
+- Verify matching anime.
+- Retrieve transparent logos.
+- Implement Fanart.tv fallback.
+- Implement language priority.
+- Implement logo cache.
+- Implement text fallback.
+
+Deliverable: Correct transparent anime logos.
+
+## PHASE 6 — VIDEO PLAYER
+
+- Integrate Media3.
+- Connect AniScroll API.
+- Implement HLS playback.
+- Implement quality selection.
+- Implement SUB/DUB.
+- Implement subtitle customization.
+- Implement progress tracking.
+
+Deliverable: Working streaming player.
+
+## PHASE 7 — ANISKIP
+
+- Implement AniSkip.
+- Retrieve timestamps.
+- Create intro skip.
+- Create outro skip.
+- Position controls on the right side.
+- Implement automatic visibility rules.
+
+Deliverable: Fully working skip functionality.
+
+## PHASE 8 — LOCAL FEATURES
+
+- Watch history.
+- Continue Watching.
+- My List.
+- Playback preferences.
+- Search history.
+- Local cache.
+
+Deliverable: Complete local user experience.
+
+## PHASE 9 — OPTIMIZATION AND RELEASE
+
+- Fix bugs.
+- Optimize memory.
+- Improve loading.
+- Test D-pad navigation.
+- Test Fire TV compatibility.
+- Test Android TV compatibility.
+- Configure app icon.
+- Configure TV banner.
+- Generate signed release APK.
+- Prepare Play Store distribution.
+
+Deliverable: Production-ready project and release artifacts.
+
+---
+
+# 35. FINAL BUILD REQUIREMENTS
+
+Do not stop after generating the Home screen.
+
+Do not create a design-only prototype.
+
+Do not simulate API data in production.
+
+Do not leave important buttons nonfunctional.
+
+Do not use fake streaming URLs.
+
+Do not create a fake video player.
+
+Do not invent Hoshika IDs or AniList mappings.
+
+Do not use AniList API.
+
+Do not use TMDB for metadata.
+
+Do not use Fanart.tv for metadata.
+
+Do not expose API credentials.
+
+Do not use Hoshika official streaming availability.
+
+Implement real functionality wherever the required API and hardware are available.
+
+If the full project is too large for one generation, complete the current phase, keep the project buildable, and continue with the next phase without deleting or rewriting working features.
+
+Maintain a project checklist and update it as features are implemented.
+
+After every major phase:
+1. Check compilation.
+2. Resolve build errors.
+3. Check dependency compatibility.
+4. Test navigation.
+5. Test relevant API functionality.
+6. Preserve all previously working functionality.
+
+---
+
+# 36. FIRST TASK — START IMPLEMENTATION NOW
+
+Begin with Phase 1 and Phase 2.
+
+Your immediate tasks:
+
+1. Create the AniScroll TV Android project.
+2. Configure its application ID as `in.aniscroll.tv`.
+3. Configure a TV-oriented Android manifest.
+4. Set up Jetpack Compose for TV.
+5. Implement the black-and-white design system.
+6. Implement the TV navigation sidebar.
+7. Implement a cinematic Home screen.
+8. Implement anime poster cards.
+9. Implement remote-control D-pad navigation.
+10. Implement focus animations.
+11. Create the project architecture for all future integrations.
+12. Verify the project builds successfully.
+
+Use real UI components and functional navigation.
+
+Use temporary local preview fixtures only for UI development, clearly separated from production repositories. Do not represent fixture data as live API results.
+
+After Phase 1 and Phase 2 are complete, continue to Phase 3.
+
+**The final goal is a complete, polished, native AniScroll TV anime streaming application that works with Android TV, Google TV and Amazon Fire TV, using Hoshika for metadata, AniScroll for HLS streaming, AniSkip for intro/outro skipping, TMDB for primary title logos, Fanart.tv for fallback logos, and Room/DataStore for local user data.**
