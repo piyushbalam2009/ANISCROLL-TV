@@ -87,6 +87,7 @@ class SettingsViewModel(
     val mappingCount: StateFlow<Int> = dao.observeMappingCount()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
+    @OptIn(coil.annotation.ExperimentalCoilApi::class)
     fun clearImageAndLogoCache(context: Context) {
         viewModelScope.launch {
             dao.clearLogoCache()
@@ -105,6 +106,7 @@ class SettingsViewModel(
         viewModelScope.launch { dao.clearWatchHistory() }
     }
 
+    @OptIn(coil.annotation.ExperimentalCoilApi::class)
     fun clearAllLocalData(context: Context) {
         viewModelScope.launch {
             dao.clearWatchlist()

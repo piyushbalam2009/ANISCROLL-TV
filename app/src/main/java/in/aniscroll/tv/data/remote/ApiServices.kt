@@ -161,8 +161,7 @@ interface AniScrollApi {
     ): Response<ResponseBody>
 
     /**
-     * Secure backend proxy routes for TMDB & Fanart.tv transparent title logos
-     * so TMDB and Fanart API credentials are never embedded in the APK.
+     * Optional backend proxy routes for TMDB & Fanart.tv transparent title logos
      */
     @GET("api/tmdb/search/tv")
     suspend fun searchTmdbTv(
@@ -173,12 +172,52 @@ interface AniScrollApi {
     @GET("api/tmdb/tv/{tvId}/images")
     suspend fun getTmdbTvImages(
         @Path("tvId") tvId: Long,
-        @Query("include_image_language") includeImageLanguage: String = "en,ja,null"
+        @Query("include_image_language") includeImageLanguage: String = "en,null,ja"
     ): Response<ResponseBody>
 
     @GET("api/fanart/tv/{tvId}")
     suspend fun getFanartTvImages(
         @Path("tvId") tvId: Long
+    ): Response<ResponseBody>
+}
+
+/**
+ * Official TMDB v3 API — Exclusively for transparent anime title logos.
+ * Base URL: https://api.themoviedb.org/3/
+ * Never used for anime metadata, posters, backdrops, or descriptions.
+ */
+interface TmdbApi {
+
+    @GET("search/tv")
+    suspend fun searchTv(
+        @Query("query") query: String,
+        @Query("first_air_date_year") firstAirDateYear: Int? = null,
+        @Query("include_adult") includeAdult: Boolean = false
+    ): Response<ResponseBody>
+
+    /**
+     * Retrieves TV series images (specifically `logos`) across English, language-neutral, and Japanese.
+     * Note: We intentionally omit `language` and pass `include_image_language=en,null,ja` so TMDB
+     * does not filter out Japanese or language-neutral logos.
+     */
+    @GET("tv/{tvId}/images")
+    suspend fun getTvImages(
+        @Path("tvId") tvId: Long,
+        @Query("include_image_language") includeImageLanguage: String = "en,null,ja"
+    ): Response<ResponseBody>
+}
+
+/**
+ * Official Fanart.tv v3.2 API — Fallback provider exclusively for transparent anime title logos (`hdtvlogo`).
+ * Base URL: https://webservice.fanart.tv/v3.2/
+ * Endpoint: GET https://webservice.fanart.tv/v3.2/tv/{tmdb_tv_id}?api_key={FANART_API_KEY}&source=tmdb
+ */
+interface FanartApi {
+
+    @GET("tv/{tmdbTvId}")
+    suspend fun getTvImages(
+        @Path("tmdbTvId") tmdbTvId: Long,
+        @Query("source") source: String = "tmdb"
     ): Response<ResponseBody>
 }
 

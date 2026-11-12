@@ -421,45 +421,28 @@ fun TvAnimePosterCard(
 /**
  * Displays a transparent anime title logo from TMDB/Fanart preserving its original aspect ratio,
  * or falls back cleanly to crisp white typography if unavailable or failed to load.
+ * Delegates to the shared [in.aniscroll.tv.artwork.AnimeLogo] component.
  */
 @Composable
 fun TvTitleLogoOrText(
     logoUrl: String?,
     fallbackTitle: String,
     modifier: Modifier = Modifier,
-    maxHeight: Dp = 84.dp,
-    maxWidth: Dp = 340.dp
+    hoshikaId: Long = 0L,
+    maxHeight: Dp = 88.dp,
+    maxWidth: Dp = 360.dp,
+    onLogoLoadFailed: ((String) -> Unit)? = null
 ) {
-    var logoLoadFailed by remember(logoUrl) { mutableStateOf(false) }
-
-    if (!logoUrl.isNullOrBlank() && !logoLoadFailed) {
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current)
-                .data(logoUrl)
-                .crossfade(true)
-                .build(),
-            contentDescription = fallbackTitle,
-            contentScale = ContentScale.Fit,
-            alignment = Alignment.CenterStart,
-            onState = { state ->
-                if (state is AsyncImagePainter.State.Error) {
-                    logoLoadFailed = true
-                }
-            },
-            modifier = modifier
-                .heightIn(max = maxHeight)
-                .widthIn(max = maxWidth)
-        )
-    } else {
-        Text(
-            text = fallbackTitle,
-            style = MaterialTheme.typography.displayMedium.copy(fontWeight = FontWeight.Bold),
-            color = TvColors.PrimaryText,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = modifier
-        )
-    }
+    `in`.aniscroll.tv.artwork.AnimeLogo(
+        hoshikaId = hoshikaId,
+        animeTitle = fallbackTitle,
+        logoUrl = logoUrl,
+        contentDescription = fallbackTitle,
+        modifier = modifier,
+        maxWidth = maxWidth,
+        maxHeight = maxHeight,
+        onLogoLoadFailed = onLogoLoadFailed
+    )
 }
 
 @Composable

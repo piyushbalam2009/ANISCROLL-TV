@@ -111,15 +111,32 @@ class HomeViewModel(
     }
 
     fun loadDevPreviewFixtures() {
-        val sample = UiPreviewFixtures.sampleAnimeList
-        _uiState.update {
-            it.copy(
-                isLoading = false,
-                featuredAnime = sample.firstOrNull(),
-                sections = UiPreviewFixtures.getPreviewHomeSections(),
-                isUsingDevFixtures = true,
-                errorMessage = null
-            )
+        viewModelScope.launch {
+            val sample = UiPreviewFixtures.sampleAnimeList
+            val first = sample.firstOrNull()?.let { animeRepository.enrichAnimeWithLogo(it) }
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    featuredAnime = first,
+                    sections = UiPreviewFixtures.getPreviewHomeSections(),
+                    isUsingDevFixtures = true,
+                    errorMessage = null
+                )
+            }
+        }
+    }
+
+    fun onHeroLogoLoadFailed(failedUrl: String) {
+        val currentFeatured = _uiState.value.featuredAnime ?: return
+        viewModelScope.launch {
+            val retried = animeRepository.invalidateAndRetryLogo(currentFeatured, failedUrl)
+            _uiState.update { state ->
+                if (state.featuredAnime?.hoshikaId == currentFeatured.hoshikaId) {
+                    state.copy(featuredAnime = retried)
+                } else {
+                    state
+                }
+            }
         }
     }
 
@@ -239,7 +256,8 @@ fun HomeScreen(
                                 playFocusRequester = heroPlayFocusRequester,
                                 onPlay = { onPlayEpisode(featured.hoshikaId, 1, null) },
                                 onDetails = { onOpenAnimeDetails(featured.hoshikaId) },
-                                onToggleWatchlist = { viewModel.toggleWatchlist(featured) }
+                                onToggleWatchlist = { viewModel.toggleWatchlist(featured) },
+                                onLogoLoadFailed = { failedUrl -> viewModel.onHeroLogoLoadFailed(failedUrl) }
                             )
                         }
                     }
@@ -293,7 +311,8 @@ private fun HomeHeroSection(
     playFocusRequester: FocusRequester,
     onPlay: () -> Unit,
     onDetails: () -> Unit,
-    onToggleWatchlist: () -> Unit
+    onToggleWatchlist: () -> Unit,
+    onLogoLoadFailed: (String) -> Unit
 ) {
     Box(
         modifier = Modifier
@@ -352,12 +371,15 @@ private fun HomeHeroSection(
                 .widthIn(max = 620.dp)
                 .padding(horizontal = 32.dp, vertical = 24.dp)
         ) {
-            // Transparent Title Logo from TMDB/Fanart or clean white typography fallback
-            TvTitleLogoOrText(
+            // Shared Transparent Title Logo from TMDB/Fanart or clean white typography fallback
+            `in`.aniscroll.tv.artwork.AnimeLogo(
+                hoshikaId = anime.hoshikaId,
+                animeTitle = anime.preferredTitle,
                 logoUrl = anime.logoUrl,
-                fallbackTitle = anime.preferredTitle,
-                maxHeight = 84.dp,
-                maxWidth = 360.dp
+                contentDescription = anime.preferredTitle,
+                maxWidth = 360.dp,
+                maxHeight = 88.dp,
+                onLogoLoadFailed = onLogoLoadFailed
             )
 
             Spacer(modifier = Modifier.height(10.dp))

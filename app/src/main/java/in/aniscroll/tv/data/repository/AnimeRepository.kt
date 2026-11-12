@@ -274,10 +274,8 @@ class AnimeRepository(
             ?: sections.firstOrNull()?.items?.firstOrNull()
 
         if (featured != null) {
-            val heroLogo = runCatching { logoRepository.getLogoForAnime(featured!!) }.getOrNull()
-            if (!heroLogo.isNullOrBlank()) {
-                featured = featured!!.copy(logoUrl = heroLogo)
-            }
+            featured = enrichAnimeWithLogo(featured!!)
+            cacheAnime(featured!!)
         }
 
         if (sections.isNotEmpty() || featured != null) {
@@ -292,8 +290,9 @@ class AnimeRepository(
         val cachedEntities = dao.getRecentCachedAnime(limit = 30)
         if (cachedEntities.isNotEmpty()) {
             val cachedAnime = cachedEntities.map { it.toDomain() }
+            val cachedFeatured = cachedAnime.firstOrNull()?.let { enrichAnimeWithLogo(it) }
             return@coroutineScope HomeFeedResult(
-                featuredAnime = cachedAnime.firstOrNull(),
+                featuredAnime = cachedFeatured,
                 sections = listOf(HomeSectionRow("Cached Library", cachedAnime)),
                 isFromOfflineCache = true,
                 errorMessage = null
@@ -312,18 +311,48 @@ class AnimeRepository(
     suspend fun getAnimeDetails(hoshikaId: Long): ResourceResult<Anime> {
         val remote = fetchRemoteAnimeDetails(hoshikaId)
         if (remote != null) {
-            val logoUrl = runCatching { logoRepository.getLogoForAnime(remote) }.getOrNull()
-            val enriched = if (!logoUrl.isNullOrBlank()) remote.copy(logoUrl = logoUrl) else remote
+            val enriched = enrichAnimeWithLogo(remote)
             cacheAnime(enriched)
             return ResourceResult.Success(enriched, isCachedFallback = false)
         }
 
         val cached = dao.getCachedAnime(hoshikaId)
         if (cached != null) {
-            return ResourceResult.Success(cached.toDomain(), isCachedFallback = true)
+            val enrichedCached = enrichAnimeWithLogo(cached.toDomain())
+            cacheAnime(enrichedCached)
+            return ResourceResult.Success(enrichedCached, isCachedFallback = true)
         }
 
         return ResourceResult.Error("Anime information is unavailable.")
+    }
+
+    suspend fun enrichAnimeWithLogo(anime: Anime, forceRefresh: Boolean = false): Anime {
+        val logoInfo = runCatching {
+            logoRepository.getLogoInfoForAnime(anime = anime, forceRefresh = forceRefresh)
+        }.getOrNull()
+        return if (logoInfo != null && !logoInfo.logoUrl.isNullOrBlank()) {
+            anime.copy(
+                logoUrl = logoInfo.logoUrl,
+                tmdbId = logoInfo.tmdbId ?: anime.tmdbId
+            )
+        } else {
+            anime
+        }
+    }
+
+    /**
+     * Invalidates a broken cached logo URL in Room and retries TMDB -> Fanart.tv -> Text fallback.
+     */
+    suspend fun invalidateAndRetryLogo(anime: Anime, failedUrl: String?): Anime {
+        val retried = runCatching {
+            logoRepository.invalidateAndRetryLogo(anime = anime, failedUrl = failedUrl)
+        }.getOrNull()
+        val updated = anime.copy(
+            logoUrl = retried?.logoUrl,
+            tmdbId = retried?.tmdbId ?: anime.tmdbId
+        )
+        cacheAnime(updated)
+        return updated
     }
 
     private suspend fun fetchRemoteAnimeDetails(hoshikaId: Long): Anime? {

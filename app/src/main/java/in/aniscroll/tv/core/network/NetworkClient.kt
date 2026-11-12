@@ -3,7 +3,9 @@ package `in`.aniscroll.tv.core.network
 import com.example.BuildConfig
 import `in`.aniscroll.tv.data.remote.AniScrollApi
 import `in`.aniscroll.tv.data.remote.AniSkipApi
+import `in`.aniscroll.tv.data.remote.FanartApi
 import `in`.aniscroll.tv.data.remote.HoshikaApi
+import `in`.aniscroll.tv.data.remote.TmdbApi
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
@@ -67,14 +69,54 @@ object NetworkModule {
             .writeTimeout(20, TimeUnit.SECONDS)
             .addInterceptor { chain ->
                 val original = chain.request()
+                val host = original.url.host.lowercase()
+                var url = original.url
                 val builder = original.newBuilder()
                     .header("Accept", "application/json")
-                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 AniScrollTV/1.0")
+                    .header(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 14; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 AniScrollTV/1.0"
+                    )
 
-                if (original.url.host.contains("hoshika.app", ignoreCase = true)) {
-                    val clientId = runCatching { BuildConfig.HOSHIKA_CLIENT_ID }.getOrNull()
-                    if (isConfiguredSecret(clientId)) {
-                        builder.header("X-Client-Id", clientId!!)
+                when {
+                    host.contains("hoshika.app") -> {
+                        val clientId = runCatching { BuildConfig.HOSHIKA_CLIENT_ID }.getOrNull()
+                        if (isConfiguredSecret(clientId)) {
+                            builder.header("X-Client-Id", clientId!!)
+                        }
+                    }
+
+                    host.contains("api.themoviedb.org") -> {
+                        val tmdbSecret = runCatching { BuildConfig.TMDB_API_KEY }.getOrNull()?.trim()
+                        if (isConfiguredSecret(tmdbSecret)) {
+                            // Support both TMDB v4 Bearer JWT tokens (eyJ...) and v3 API keys
+                            if (tmdbSecret!!.startsWith("eyJ") || tmdbSecret.length > 40) {
+                                builder.header("Authorization", "Bearer $tmdbSecret")
+                            } else if (url.queryParameter("api_key") == null) {
+                                url = url.newBuilder()
+                                    .addQueryParameter("api_key", tmdbSecret)
+                                    .build()
+                                builder.url(url)
+                            }
+                        }
+                    }
+
+                    host.contains("fanart.tv") -> {
+                        val fanartSecret = runCatching { BuildConfig.FANART_API_KEY }.getOrNull()?.trim()
+                        val urlBuilder = url.newBuilder()
+                        var changed = false
+                        if (isConfiguredSecret(fanartSecret) && url.queryParameter("api_key") == null) {
+                            urlBuilder.addQueryParameter("api_key", fanartSecret!!)
+                            changed = true
+                        }
+                        if (url.queryParameter("source") == null) {
+                            urlBuilder.addQueryParameter("source", "tmdb")
+                            changed = true
+                        }
+                        if (changed) {
+                            url = urlBuilder.build()
+                            builder.url(url)
+                        }
                     }
                 }
 
@@ -98,6 +140,22 @@ object NetworkModule {
             .client(okHttpClient)
             .build()
             .create(AniScrollApi::class.java)
+    }
+
+    val tmdbApi: TmdbApi by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://api.themoviedb.org/3/")
+            .client(okHttpClient)
+            .build()
+            .create(TmdbApi::class.java)
+    }
+
+    val fanartApi: FanartApi by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://webservice.fanart.tv/v3.2/")
+            .client(okHttpClient)
+            .build()
+            .create(FanartApi::class.java)
     }
 
     val aniSkipApi: AniSkipApi by lazy {

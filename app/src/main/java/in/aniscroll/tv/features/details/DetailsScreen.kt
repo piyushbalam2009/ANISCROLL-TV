@@ -110,7 +110,7 @@ class DetailsViewModel(
             val animeResult = animeRepository.getAnimeDetails(hoshikaId)
             val resolvedAnime = when (animeResult) {
                 is ResourceResult.Success -> animeResult.data
-                is ResourceResult.Error -> fixtureAnime
+                is ResourceResult.Error -> fixtureAnime?.let { animeRepository.enrichAnimeWithLogo(it) }
             }
 
             if (resolvedAnime == null) {
@@ -140,6 +140,20 @@ class DetailsViewModel(
                     episodes = resolvedEpisodes,
                     errorMessage = null
                 )
+            }
+        }
+    }
+
+    fun onLogoLoadFailed(failedUrl: String) {
+        val currentAnime = _uiState.value.anime ?: return
+        viewModelScope.launch {
+            val retried = animeRepository.invalidateAndRetryLogo(currentAnime, failedUrl)
+            _uiState.update { state ->
+                if (state.anime?.hoshikaId == currentAnime.hoshikaId) {
+                    state.copy(anime = retried)
+                } else {
+                    state
+                }
             }
         }
     }
@@ -292,11 +306,16 @@ fun DetailsScreen(
 
                                 // Title Logo, Titles, Metadata, Description, Action Buttons
                                 Column(modifier = Modifier.weight(1f)) {
-                                    TvTitleLogoOrText(
+                                    `in`.aniscroll.tv.artwork.AnimeLogo(
+                                        hoshikaId = anime.hoshikaId,
+                                        animeTitle = anime.preferredTitle,
                                         logoUrl = anime.logoUrl,
-                                        fallbackTitle = anime.preferredTitle,
-                                        maxHeight = 90.dp,
-                                        maxWidth = 380.dp
+                                        contentDescription = anime.preferredTitle,
+                                        maxWidth = 380.dp,
+                                        maxHeight = 92.dp,
+                                        onLogoLoadFailed = { failedUrl ->
+                                            viewModel.onLogoLoadFailed(failedUrl)
+                                        }
                                     )
 
                                     Spacer(modifier = Modifier.height(8.dp))

@@ -42,6 +42,9 @@ interface AniScrollDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLogoCache(logoCache: LogoCacheEntity)
 
+    @Query("DELETE FROM logo_cache WHERE hoshika_id = :hoshikaId")
+    suspend fun deleteLogoCache(hoshikaId: Long)
+
     @Query("DELETE FROM logo_cache")
     suspend fun clearLogoCache()
 

@@ -28,11 +28,17 @@ class AppContainer(context: Context) {
     }
 
     val tmdbLogoProvider: TmdbLogoProvider by lazy {
-        TmdbLogoProvider(NetworkModule.aniScrollApi)
+        TmdbLogoProvider(
+            tmdbApi = NetworkModule.tmdbApi,
+            aniScrollApi = NetworkModule.aniScrollApi
+        )
     }
 
     val fanartLogoProvider: FanartLogoProvider by lazy {
-        FanartLogoProvider(NetworkModule.aniScrollApi)
+        FanartLogoProvider(
+            fanartApi = NetworkModule.fanartApi,
+            aniScrollApi = NetworkModule.aniScrollApi
+        )
     }
 
     val logoRepository: LogoRepository by lazy {
