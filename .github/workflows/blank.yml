@@ -12,47 +12,93 @@ permissions:
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Checkout source code
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Setup Java
       - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
+      # 3. Setup Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # 4. Locate Android project
       - name: Locate Android project
         id: project
         shell: bash
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "Repository contents:"
           ls -la
 
-          WRAPPER=$(find . -name gradlew -type f -print -quit)
+          WRAPPER=$(find . -type f -name gradlew -print -quit)
 
           if [ -n "$WRAPPER" ]; then
-            DIR=$(dirname "$WRAPPER")
-            echo "Found wrapper: $WRAPPER"
+            PROJECT_DIR=$(dirname "$WRAPPER")
+            echo "Found Gradle wrapper: $WRAPPER"
           else
-            SETTINGS=$(find . -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)
+            SETTINGS=$(find . -type f \( \
+              -name settings.gradle.kts -o \
+              -name settings.gradle \
+            \) -print -quit)
 
             if [ -z "$SETTINGS" ]; then
-              echo "ERROR: Android Gradle project not found"
+              echo "ERROR: Gradle project not found"
               exit 1
             fi
 
-            DIR=$(dirname "$SETTINGS")
-            echo "Gradle wrapper missing. Using installed Gradle."
+            PROJECT_DIR=$(dirname "$SETTINGS")
+            echo "Gradle wrapper missing."
+            echo "Using runner-installed Gradle."
           fi
 
-          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          PROJECT_DIR="${PROJECT_DIR#./}"
+          echo "Project directory: $PROJECT_DIR"
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
+      # 5. Verify Android SDK
+      - name: Verify Android SDK
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          if [ -z "$ANDROID_HOME" ] || [ ! -d "$ANDROID_HOME" ]; then
+            echo "ERROR: Android SDK not found on runner."
+            exit 1
+          fi
+
+          echo "Android SDK found."
+
+      # 6. Generate debug signing keystore
+      - name: Generate debug keystore
+        shell: bash
+        run: |
+          cd "${{ steps.project.outputs.dir }}"
+
+          if [ ! -f debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          echo "Debug keystore ready."
+
+      # 7. Build APK
       - name: Build Debug APK
         shell: bash
         run: |
@@ -65,10 +111,32 @@ jobs:
             gradle assembleDebug --no-daemon
           fi
 
-      - name: Upload APK
+      # 8. Verify APK
+      - name: Verify APK
+        shell: bash
+        run: |
+          APK_DIR="${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug"
+
+          if [ ! -d "$APK_DIR" ]; then
+            echo "ERROR: APK output directory not found."
+            find "${{ steps.project.outputs.dir }}" -name "*.apk"
+            exit 1
+          fi
+
+          find "$APK_DIR" -name "*.apk" -type f
+
+          if ! find "$APK_DIR" -name "*.apk" -type f | grep -q .; then
+            echo "ERROR: No APK generated."
+            exit 1
+          fi
+
+          echo "APK generated successfully."
+
+      # 9. Upload APK
+      - name: Upload ANISCROLL-TV APK
         uses: actions/upload-artifact@v4
         with:
           name: ANISCROLL-TV-debug
-          path: '**/build/outputs/apk/debug/*.apk'
+          path: ${{ steps.project.outputs.dir }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
