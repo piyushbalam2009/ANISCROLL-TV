@@ -31,22 +31,29 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: 'true'
+          log-accepted-android-sdk-licenses: 'false'
+          packages: ''
 
-      - name: Install Android SDK
+      - name: Install Android SDK packages
+        shell: bash
         run: |
-          yes | sdkmanager --licenses
+          set -euo pipefail
+
           sdkmanager --install \
             "platforms;android-36.1" \
             "build-tools;36.0.0" \
             "platform-tools"
 
-      - name: Set up Gradle 9.3.1
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
 
       - name: Validate signing secrets
+        shell: bash
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
@@ -56,12 +63,13 @@ jobs:
 
           for name in RELEASE_KEYSTORE_BASE64 RELEASE_STORE_PASSWORD RELEASE_KEY_PASSWORD; do
             if [ -z "${!name}" ]; then
-              echo "::error::Missing secret: $name"
+              echo "::error::Missing GitHub secret: $name"
               exit 1
             fi
           done
 
       - name: Restore release keystore
+        shell: bash
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
           RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
@@ -80,7 +88,8 @@ jobs:
 
           echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
 
-      - name: Configure optional API secrets
+      - name: Configure optional API values
+        shell: bash
         env:
           HOSHIKA_CLIENT_ID: ${{ secrets.HOSHIKA_CLIENT_ID }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
@@ -89,14 +98,9 @@ jobs:
           set -euo pipefail
           : > .env
 
-          [ -z "$HOSHIKA_CLIENT_ID" ] || \
-            printf 'HOSHIKA_CLIENT_ID=%s\n' "$HOSHIKA_CLIENT_ID" >> .env
-
-          [ -z "$TMDB_API_KEY" ] || \
-            printf 'TMDB_API_KEY=%s\n' "$TMDB_API_KEY" >> .env
-
-          [ -z "$FANART_API_KEY" ] || \
-            printf 'FANART_API_KEY=%s\n' "$FANART_API_KEY" >> .env
+          [ -z "$HOSHIKA_CLIENT_ID" ] || printf 'HOSHIKA_CLIENT_ID=%s\n' "$HOSHIKA_CLIENT_ID" >> .env
+          [ -z "$TMDB_API_KEY" ] || printf 'TMDB_API_KEY=%s\n' "$TMDB_API_KEY" >> .env
+          [ -z "$FANART_API_KEY" ] || printf 'FANART_API_KEY=%s\n' "$FANART_API_KEY" >> .env
 
           chmod 600 .env
 
@@ -104,24 +108,28 @@ jobs:
         env:
           STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: gradle testDebugUnitTest --no-daemon
+        run: gradle testDebugUnitTest --no-daemon --stacktrace
 
-      - name: Build release APK
+      - name: Build signed release APK
         env:
           STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: gradle assembleRelease --no-daemon
+        run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: Verify APK
+        shell: bash
         run: |
           set -euo pipefail
 
           APK="app/build/outputs/apk/release/app-release.apk"
 
-          test -s "$APK"
+          if [ ! -s "$APK" ]; then
+            echo "::error::Release APK not found"
+            find app/build/outputs -type f -name '*.apk' -print || true
+            exit 1
+          fi
 
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" \
-            verify --verbose "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK"
 
           echo "APK SHA256:"
           sha256sum "$APK"
