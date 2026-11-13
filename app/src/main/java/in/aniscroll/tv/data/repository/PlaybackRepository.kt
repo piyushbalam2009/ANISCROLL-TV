@@ -11,6 +11,11 @@ import `in`.aniscroll.tv.domain.model.SkipIntervals
 import `in`.aniscroll.tv.domain.model.StreamData
 import `in`.aniscroll.tv.domain.model.TimeRange
 
+enum class StreamingProvider(val slug: String) {
+    ZOKO_ANIME("zokoanime"),
+    MEGA_PLAY("megaplay")
+}
+
 sealed class StreamLoadResult {
     data class Success(
         val streamData: StreamData,
@@ -30,13 +35,28 @@ class PlaybackRepository(
 
     companion object {
         private const val COMPLETION_THRESHOLD = 0.90f
+
+        /**
+         * Determines the streaming provider strictly from the anime format:
+         * - MOVIE -> ZokoAnime (`GET /api/watch/zokoanime/{anilist_id}/{episode}/{sub/dub}`)
+         * - All other formats (TV, TV_SHORT, SPECIAL, OVA, ONA, episodic) -> MegaPlay (`GET /api/watch/megaplay/{anilist_id}/{episode}/{sub/dub}`)
+         */
+        fun selectProviderForFormat(format: String?): StreamingProvider {
+            return if (format?.trim()?.equals("MOVIE", ignoreCase = true) == true) {
+                StreamingProvider.ZOKO_ANIME
+            } else {
+                StreamingProvider.MEGA_PLAY
+            }
+        }
     }
 
     /**
-     * Complete playback resolution flow (Sections 8, 18, 19):
-     * 1. Convert Hoshika ID -> AniList ID using HoshikaIdConverter.
+     * Complete playback resolution flow:
+     * 1. Convert Hoshika ID -> AniList ID and resolve anime format using HoshikaIdConverter.
      * 2. Validate mapping (never pass Hoshika ID directly).
-     * 3. Call GET https://api.aniscroll.in/api/watch/zokoanime/{anilist_id}/{episode}/{sub|dub}.
+     * 3. Select the streaming provider based on anime format BEFORE making the API request:
+     *    - If format is MOVIE: call GET https://anivault-scraper-five.vercel.app/api/watch/zokoanime/{anilist_id}/{episode}/{sub|dub}
+     *    - Otherwise (TV series, TV specials, episodic): call GET https://anivault-scraper-five.vercel.app/api/watch/megaplay/{anilist_id}/{episode}/{sub|dub}
      * 4. Fetch AniSkip v2 timestamps using the AniList ID.
      * 5. Retrieve saved playback progress from Room.
      */
@@ -46,21 +66,38 @@ class PlaybackRepository(
         language: String
     ): StreamLoadResult {
         val normalizedLang = if (language.equals("dub", ignoreCase = true)) "dub" else "sub"
+        val targetEpisode = if (episodeNumber > 0) episodeNumber else 1
 
-        // Step 1: Convert Hoshika ID -> AniList ID
-        val anilistId = idConverter.convert(anime)
+        // Step 1: Convert Hoshika ID -> AniList ID and resolve format metadata
+        val resolvedTarget = idConverter.resolveTarget(anime)
+        val anilistId = resolvedTarget?.anilistId
 
         if (anilistId == null || anilistId <= 0L) {
             return StreamLoadResult.Error("Unable to find a compatible streaming ID for this anime.")
         }
 
-        // Step 2: Request HLS stream from AniScroll backend
+        // Step 2: Select provider strictly from anime format before making the network request
+        val effectiveFormat = resolvedTarget.format ?: anime.format
+        val provider = selectProviderForFormat(effectiveFormat)
+
+        // Step 3: Request HLS stream from the selected provider only (never cross-calling the other provider)
         val response = runCatching {
-            aniScrollApi.getEpisodeStreams(
-                anilistId = anilistId,
-                episode = episodeNumber,
-                language = normalizedLang
-            )
+            when (provider) {
+                StreamingProvider.ZOKO_ANIME -> {
+                    aniScrollApi.getZokoAnimeStreams(
+                        anilistId = anilistId,
+                        episode = targetEpisode,
+                        language = normalizedLang
+                    )
+                }
+                StreamingProvider.MEGA_PLAY -> {
+                    aniScrollApi.getMegaPlayStreams(
+                        anilistId = anilistId,
+                        episode = targetEpisode,
+                        language = normalizedLang
+                    )
+                }
+            }
         }.getOrElse {
             return StreamLoadResult.Error("Unable to connect. Check your internet connection.")
         }
@@ -81,20 +118,20 @@ class PlaybackRepository(
 
         val streamData = JsonParsers.parseAniScrollStreamResponse(
             anilistId = anilistId,
-            episodeNumber = episodeNumber,
+            episodeNumber = targetEpisode,
             language = normalizedLang,
             rawBody = rawBody
         ) ?: return StreamLoadResult.Error("No playable streaming source was found.")
 
-        // Step 3: Fetch AniSkip v2 intervals (gracefully fallback if unavailable)
+        // Step 4: Fetch AniSkip v2 intervals (gracefully fallback if unavailable)
         val skipIntervals = fetchAniSkipIntervals(
             anilistId = anilistId,
-            episodeNumber = episodeNumber,
+            episodeNumber = targetEpisode,
             streamData = streamData
         )
 
-        // Step 4: Check saved playback position in Room
-        val savedHistory = dao.getEpisodeProgress(anime.hoshikaId, episodeNumber)
+        // Step 5: Check saved playback position in Room
+        val savedHistory = dao.getEpisodeProgress(anime.hoshikaId, targetEpisode)
         val resumePositionMs = if (savedHistory != null && !savedHistory.completed) {
             savedHistory.position
         } else {

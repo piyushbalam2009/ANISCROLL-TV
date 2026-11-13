@@ -84,12 +84,6 @@ fun TvFocusableButton(
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
 
-    val scale by animateFloatAsState(
-        targetValue = if (isFocused && enabled) 1.05f else 1.0f,
-        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-        label = "button_scale"
-    )
-
     val containerColor by animateColorAsState(
         targetValue = when {
             !enabled -> TvColors.CardBackground.copy(alpha = 0.5f)
@@ -125,14 +119,10 @@ fun TvFocusableButton(
         modifier = modifier
             .then(focusMod)
             .minimumInteractiveComponentSize()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
             .clip(RoundedCornerShape(6.dp))
             .background(containerColor)
             .border(
-                width = if (isFocused) 2.dp else 1.dp,
+                width = 1.5.dp,
                 color = borderColor,
                 shape = RoundedCornerShape(6.dp)
             )
@@ -187,12 +177,6 @@ fun TvSelectableChip(
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
 
-    val scale by animateFloatAsState(
-        targetValue = if (isFocused) 1.05f else 1.0f,
-        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-        label = "chip_scale"
-    )
-
     val bg = when {
         isFocused -> TvColors.FocusBackground
         selected -> TvColors.ElevatedSurface
@@ -212,13 +196,9 @@ fun TvSelectableChip(
     Box(
         modifier = modifier
             .minimumInteractiveComponentSize()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
             .clip(RoundedCornerShape(6.dp))
             .background(bg)
-            .border(if (isFocused || selected) 2.dp else 1.dp, border, RoundedCornerShape(6.dp))
+            .border(1.5.dp, border, RoundedCornerShape(6.dp))
             .onKeyEvent { event ->
                 if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN &&
                     (event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
@@ -268,11 +248,16 @@ fun TvAnimePosterCard(
         }
     }
 
-    val scale by animateFloatAsState(
-        targetValue = if (isFocused) 1.06f else 1.0f,
-        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
-        label = "card_scale"
-    )
+    val context = LocalContext.current
+    val posterRequest = remember(context, anime.posterUrl) {
+        anime.posterUrl?.takeIf { it.isNotBlank() }?.let { url ->
+            ImageRequest.Builder(context)
+                .data(url)
+                .crossfade(true)
+                .size(360, 540)
+                .build()
+        }
+    }
 
     val focusMod = if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier
 
@@ -280,10 +265,6 @@ fun TvAnimePosterCard(
         modifier = modifier
             .width(cardWidth)
             .then(focusMod)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
             .onKeyEvent { event ->
                 if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN &&
                     (event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
@@ -310,18 +291,14 @@ fun TvAnimePosterCard(
                 .clip(RoundedCornerShape(6.dp))
                 .background(TvColors.CardBackground)
                 .border(
-                    width = if (isFocused) 2.5.dp else 1.dp,
+                    width = 1.5.dp,
                     color = if (isFocused) TvColors.FocusOutline else TvColors.Divider,
                     shape = RoundedCornerShape(6.dp)
                 )
         ) {
-            if (!anime.posterUrl.isNullOrBlank()) {
+            if (posterRequest != null) {
                 AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current)
-                        .data(anime.posterUrl)
-                        .crossfade(true)
-                        .size(360, 540)
-                        .build(),
+                    model = posterRequest,
                     contentDescription = anime.preferredTitle,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()

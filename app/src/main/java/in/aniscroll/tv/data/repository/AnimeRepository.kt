@@ -426,17 +426,100 @@ class AnimeRepository(
         val trimmed = query.trim()
         if (trimmed.isEmpty()) return ResourceResult.Success(emptyList())
 
-        val raw = executeHoshikaGet(
-            directCall = { hoshikaApi.search(query = trimmed, limit = 30) },
-            proxyPath = "search",
-            query = trimmed,
-            page = page
+        `in`.aniscroll.tv.features.search.SearchLogger.d(
+            "Starting search query='$trimmed' page=$page endpoint='https://hoshika.app/api/v1/search?q=$trimmed&limit=20&locale=en'"
         )
-        if (raw != null) {
-            val list = JsonParsers.parseAnimeListFromResponse(raw)
-            cacheAnimeBatch(list)
+
+        var searchHttpCode: Int? = null
+        var searchRaw: String? = null
+        try {
+            val resp = hoshikaApi.search(query = trimmed, limit = 20)
+            searchHttpCode = resp.code()
+            `in`.aniscroll.tv.features.search.SearchLogger.d(
+                "Endpoint='/api/v1/search' query='$trimmed' HTTP status=$searchHttpCode"
+            )
+            if (resp.isSuccessful) {
+                val body = resp.body()?.string()?.trim()
+                if (!body.isNullOrBlank() && (body.startsWith("{") || body.startsWith("["))) {
+                    searchRaw = body
+                }
+            }
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            `in`.aniscroll.tv.features.search.SearchLogger.d(
+                "Search request cancelled for query='$trimmed'"
+            )
+            throw ce
+        } catch (e: Exception) {
+            `in`.aniscroll.tv.features.search.SearchLogger.w(
+                "Network failure on '/api/v1/search' for query='$trimmed': ${e.message}",
+                e
+            )
+        }
+
+        if (searchRaw != null) {
+            val list = JsonParsers.parseAnimeListFromResponse(searchRaw).distinctBy { it.hoshikaId }
+            `in`.aniscroll.tv.features.search.SearchLogger.i(
+                "Endpoint='/api/v1/search' query='$trimmed' returned ${list.size} results"
+            )
+            if (list.isNotEmpty()) {
+                cacheAnimeBatch(list)
+                return ResourceResult.Success(list)
+            }
+        }
+
+        // Fallback to Hoshika /catalog?type=anime&q=... if /search returned empty or error
+        `in`.aniscroll.tv.features.search.SearchLogger.d(
+            "Attempting fallback endpoint='https://hoshika.app/api/v1/catalog?type=anime&q=$trimmed&page=$page' for query='$trimmed'"
+        )
+        var catalogRaw: String? = null
+        try {
+            val catResp = hoshikaApi.getCatalog(type = "anime", query = trimmed, page = page)
+            `in`.aniscroll.tv.features.search.SearchLogger.d(
+                "Endpoint='/api/v1/catalog' query='$trimmed' HTTP status=${catResp.code()}"
+            )
+            if (catResp.isSuccessful) {
+                val body = catResp.body()?.string()?.trim()
+                if (!body.isNullOrBlank() && (body.startsWith("{") || body.startsWith("["))) {
+                    catalogRaw = body
+                }
+            }
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            `in`.aniscroll.tv.features.search.SearchLogger.d(
+                "Catalog search fallback cancelled for query='$trimmed'"
+            )
+            throw ce
+        } catch (e: Exception) {
+            `in`.aniscroll.tv.features.search.SearchLogger.w(
+                "Network failure on '/api/v1/catalog' for query='$trimmed': ${e.message}",
+                e
+            )
+        }
+
+        if (catalogRaw != null) {
+            val list = JsonParsers.parseAnimeListFromResponse(catalogRaw).distinctBy { it.hoshikaId }
+            `in`.aniscroll.tv.features.search.SearchLogger.i(
+                "Endpoint='/api/v1/catalog' query='$trimmed' returned ${list.size} results"
+            )
+            if (list.isNotEmpty()) {
+                cacheAnimeBatch(list)
+            } else {
+                `in`.aniscroll.tv.features.search.SearchLogger.i(
+                    "Empty search response for query='$trimmed' across /search and /catalog"
+                )
+            }
             return ResourceResult.Success(list)
         }
+
+        if (searchRaw != null) {
+            `in`.aniscroll.tv.features.search.SearchLogger.i(
+                "Empty search response for query='$trimmed'"
+            )
+            return ResourceResult.Success(emptyList())
+        }
+
+        `in`.aniscroll.tv.features.search.SearchLogger.e(
+            "Search failed for query='$trimmed' (last HTTP status=${searchHttpCode ?: "none"})"
+        )
         return ResourceResult.Error("Unable to connect. Check your internet connection.")
     }
 
@@ -583,8 +666,10 @@ class AnimeRepository(
     ): String? {
         val directResp = runCatching { directCall() }.getOrNull()
         if (directResp != null && directResp.isSuccessful) {
-            val body = directResp.body()?.string()
-            if (!body.isNullOrBlank()) return body
+            val body = directResp.body()?.string()?.trim()
+            if (!body.isNullOrBlank() && (body.startsWith("{") || body.startsWith("["))) {
+                return body
+            }
         }
 
         val proxyResp = runCatching {
@@ -597,23 +682,37 @@ class AnimeRepository(
             )
         }.getOrNull()
         if (proxyResp != null && proxyResp.isSuccessful) {
-            val body = proxyResp.body()?.string()
-            if (!body.isNullOrBlank()) return body
+            val body = proxyResp.body()?.string()?.trim()
+            if (!body.isNullOrBlank() && (body.startsWith("{") || body.startsWith("["))) {
+                return body
+            }
         }
         return null
     }
 
     private suspend fun cacheAnime(anime: Anime) {
         idConverter.cacheMappingIfValid(anime.hoshikaId, anime.anilistId)
-        dao.insertAnime(anime.toEntity())
+        val existingAnime = dao.getCachedAnime(anime.hoshikaId)
+        val existingLogo = dao.getLogoCache(anime.hoshikaId)?.takeIf { it.validationStatus == "VALID" }
+        val merged = anime.copy(
+            logoUrl = anime.logoUrl ?: existingLogo?.logoUrl ?: existingAnime?.logoUrl,
+            tmdbId = anime.tmdbId ?: existingLogo?.tmdbId ?: existingAnime?.tmdbId
+        )
+        dao.insertAnime(merged.toEntity())
     }
 
     private suspend fun cacheAnimeBatch(list: List<Anime>) {
         if (list.isEmpty()) return
-        for (anime in list) {
+        val entities = list.map { anime ->
             idConverter.cacheMappingIfValid(anime.hoshikaId, anime.anilistId)
+            val existingAnime = dao.getCachedAnime(anime.hoshikaId)
+            val existingLogo = dao.getLogoCache(anime.hoshikaId)?.takeIf { it.validationStatus == "VALID" }
+            anime.copy(
+                logoUrl = anime.logoUrl ?: existingLogo?.logoUrl ?: existingAnime?.logoUrl,
+                tmdbId = anime.tmdbId ?: existingLogo?.tmdbId ?: existingAnime?.tmdbId
+            ).toEntity()
         }
-        dao.insertAnimeList(list.map { it.toEntity() })
+        dao.insertAnimeList(entities)
     }
 
     private fun Anime.toEntity(): AnimeEntity = AnimeEntity(

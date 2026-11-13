@@ -75,6 +75,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStop() {
+        super.onStop()
+        if (::appContainer.isInitialized) {
+            appContainer.exoPlayerManager.pauseIfActive()
+        }
+    }
+
+    override fun onDestroy() {
+        if (::appContainer.isInitialized) {
+            appContainer.exoPlayerManager.releasePlayer()
+        }
+        super.onDestroy()
+    }
+
     private fun configureTelevisionImmersiveWindow() {
         WindowCompat.getInsetsController(window, window.decorView).apply {
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE

@@ -1,5 +1,6 @@
 package `in`.aniscroll.tv.features.search
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -17,9 +18,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.Clear
@@ -30,12 +34,22 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -49,6 +63,7 @@ import `in`.aniscroll.tv.core.designsystem.TvSelectableChip
 import `in`.aniscroll.tv.data.repository.AnimeRepository
 import `in`.aniscroll.tv.data.repository.ResourceResult
 import `in`.aniscroll.tv.domain.model.Anime
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -64,7 +79,8 @@ data class SearchUiState(
     val isLoading: Boolean = false,
     val results: List<Anime> = emptyList(),
     val hasSearched: Boolean = false,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val lastSelectedResultId: Long = -1L
 )
 
 class SearchViewModel(
@@ -78,22 +94,38 @@ class SearchViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private var searchJob: Job? = null
+    private var lastCompletedTrimmedQuery: String? = null
+
+    fun onQueryChanged(newQuery: String) {
+        if (newQuery == _uiState.value.query) return
+        updateQuery(newQuery, immediate = false)
+    }
 
     fun appendCharacter(char: String) {
-        updateQuery(_uiState.value.query + char)
+        updateQuery(_uiState.value.query + char, immediate = false)
     }
 
     fun backspace() {
         val current = _uiState.value.query
         if (current.isNotEmpty()) {
-            updateQuery(current.dropLast(1))
+            updateQuery(current.dropLast(1), immediate = false)
         }
     }
 
     fun clearQuery() {
         searchJob?.cancel()
+        searchJob = null
+        lastCompletedTrimmedQuery = null
+        SearchLogger.d("Search query cleared")
         _uiState.update {
-            SearchUiState(query = "", isLoading = false, results = emptyList(), hasSearched = false)
+            SearchUiState(
+                query = "",
+                isLoading = false,
+                results = emptyList(),
+                hasSearched = false,
+                errorMessage = null,
+                lastSelectedResultId = -1L
+            )
         }
     }
 
@@ -108,6 +140,10 @@ class SearchViewModel(
         }
     }
 
+    fun recordSelectedResult(hoshikaId: Long) {
+        _uiState.update { it.copy(lastSelectedResultId = hoshikaId) }
+    }
+
     fun clearHistory() {
         viewModelScope.launch {
             animeRepository.clearSearchHistory()
@@ -120,38 +156,62 @@ class SearchViewModel(
 
         val trimmed = newQuery.trim()
         if (trimmed.isEmpty()) {
-            _uiState.update { it.copy(isLoading = false, results = emptyList(), hasSearched = false) }
+            lastCompletedTrimmedQuery = null
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    results = emptyList(),
+                    hasSearched = false,
+                    errorMessage = null
+                )
+            }
+            return
+        }
+
+        // Avoid duplicate API calls if the same query already succeeded and this isn't a manual retry
+        if (!immediate &&
+            trimmed == lastCompletedTrimmedQuery &&
+            _uiState.value.hasSearched &&
+            _uiState.value.errorMessage == null
+        ) {
             return
         }
 
         searchJob = viewModelScope.launch {
-            if (!immediate) {
-                delay(420L) // Debounce remote key presses
-            }
-            _uiState.update { it.copy(isLoading = true) }
-            when (val res = animeRepository.searchAnime(trimmed)) {
-                is ResourceResult.Success -> {
-                    if (trimmed.length >= 2) {
-                        animeRepository.saveSearchQuery(trimmed)
+            try {
+                if (!immediate) {
+                    delay(400L) // Debounce remote & keyboard input (~400 ms)
+                }
+                _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+                when (val res = animeRepository.searchAnime(trimmed)) {
+                    is ResourceResult.Success -> {
+                        val deduped = res.data.distinctBy { it.hoshikaId }
+                        lastCompletedTrimmedQuery = trimmed
+                        if (trimmed.length >= 2) {
+                            animeRepository.saveSearchQuery(trimmed)
+                        }
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                results = deduped,
+                                hasSearched = true,
+                                errorMessage = null
+                            )
+                        }
                     }
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            results = res.data,
-                            hasSearched = true,
-                            errorMessage = null
-                        )
+                    is ResourceResult.Error -> {
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                hasSearched = true,
+                                errorMessage = res.userMessage
+                            )
+                        }
                     }
                 }
-                is ResourceResult.Error -> {
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            hasSearched = true,
-                            errorMessage = res.userMessage
-                        )
-                    }
-                }
+            } catch (ce: CancellationException) {
+                SearchLogger.d("Cancelled obsolete search job for query='$trimmed'")
+                throw ce
             }
         }
     }
@@ -174,20 +234,42 @@ fun SearchScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val history by viewModel.searchHistory.collectAsStateWithLifecycle()
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    var isInputFieldFocused by remember { mutableStateOf(false) }
+    var isSoftwareKeyboardOpen by remember { mutableStateOf(false) }
+
+    val inputFocusRequester = remember { FocusRequester() }
+    val firstKeyFocusRequester = remember { FocusRequester() }
+
+    // Initial focus when opening SearchScreen (or restore to selected result when returning from Details)
+    LaunchedEffect(Unit) {
+        if (state.lastSelectedResultId <= 0L) {
+            runCatching { firstKeyFocusRequester.requestFocus() }
+        }
+    }
+
+    // Pressing BACK while the software keyboard / text field is active closes the keyboard first
+    BackHandler(enabled = isSoftwareKeyboardOpen || isInputFieldFocused) {
+        keyboardController?.hide()
+        isSoftwareKeyboardOpen = false
+        isInputFieldFocused = false
+        runCatching { firstKeyFocusRequester.requestFocus() }
+    }
 
     Row(
         modifier = modifier
             .fillMaxSize()
             .background(TvColors.MainBackground)
-            .padding(horizontal = 28.dp, vertical = 24.dp),
-        horizontalArrangement = Arrangement.spacedBy(28.dp)
+            .padding(horizontal = 28.dp, vertical = 20.dp),
+        horizontalArrangement = Arrangement.spacedBy(24.dp)
     ) {
         // Left Pane: Television On-Screen Keyboard & Search Input
         Column(
             modifier = Modifier
-                .width(300.dp)
+                .width(332.dp)
                 .fillMaxHeight(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
                 text = "Search Hoshika",
@@ -195,13 +277,17 @@ fun SearchScreen(
                 color = TvColors.PrimaryText
             )
 
-            // Search query display box
+            // Interactive Search query input box (supports both physical/IME keyboard & on-screen keys)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(6.dp))
                     .background(TvColors.CardBackground)
-                    .border(1.5.dp, TvColors.PrimaryText, RoundedCornerShape(6.dp))
+                    .border(
+                        width = 1.5.dp,
+                        color = if (isInputFieldFocused) TvColors.FocusOutline else TvColors.PrimaryText.copy(alpha = 0.7f),
+                        shape = RoundedCornerShape(6.dp)
+                    )
                     .padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -211,11 +297,40 @@ fun SearchScreen(
                     tint = TvColors.PrimaryText
                 )
                 Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = state.query.ifEmpty { "Use remote keyboard..." },
-                    style = MaterialTheme.typography.titleMedium,
-                    color = if (state.query.isEmpty()) TvColors.MutedText else TvColors.PrimaryText
-                )
+                Box(modifier = Modifier.weight(1f)) {
+                    if (state.query.isEmpty()) {
+                        Text(
+                            text = "Type or use remote keyboard...",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = TvColors.MutedText
+                        )
+                    }
+                    BasicTextField(
+                        value = state.query,
+                        onValueChange = { viewModel.onQueryChanged(it) },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.titleMedium.copy(color = TvColors.PrimaryText),
+                        cursorBrush = SolidColor(TvColors.PrimaryText),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(
+                            onSearch = {
+                                keyboardController?.hide()
+                                isSoftwareKeyboardOpen = false
+                                viewModel.triggerSearchNow()
+                            }
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(inputFocusRequester)
+                            .onFocusChanged { focusState ->
+                                isInputFieldFocused = focusState.isFocused
+                                if (focusState.isFocused) {
+                                    isSoftwareKeyboardOpen = true
+                                }
+                            }
+                            .testTag("search_input_field")
+                    )
+                }
             }
 
             // Action row: Space, Backspace, Clear
@@ -253,9 +368,10 @@ fun SearchScreen(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                items(TV_KEYBOARD_KEYS, key = { "key_$it" }) { keyChar ->
+                itemsIndexed(TV_KEYBOARD_KEYS, key = { _, keyChar -> "key_$keyChar" }) { index, keyChar ->
                     TvFocusableButton(
                         text = keyChar,
+                        focusRequester = if (index == 0) firstKeyFocusRequester else null,
                         onClick = { viewModel.appendCharacter(keyChar.lowercase()) },
                         contentPadding = PaddingValues(vertical = 10.dp),
                         modifier = Modifier.testTag("search_key_$keyChar")
@@ -303,7 +419,7 @@ fun SearchScreen(
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     )
                 }
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(8.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(history, key = { "hist_$it" }) { item ->
                         TvSelectableChip(
@@ -313,22 +429,28 @@ fun SearchScreen(
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(16.dp))
             }
 
             when {
                 state.isLoading -> {
-                    TvLoadingIndicator(message = "Searching Hoshika for \"${state.query}\"...")
+                    TvLoadingIndicator(
+                        message = "Searching Hoshika for \"${state.query}\"...",
+                        modifier = Modifier.testTag("search_loading_indicator")
+                    )
                 }
                 state.errorMessage != null -> {
                     TvErrorBanner(
                         message = state.errorMessage!!,
-                        onRetry = { viewModel.triggerSearchNow() }
+                        onRetry = { viewModel.triggerSearchNow() },
+                        modifier = Modifier.testTag("search_error_banner")
                     )
                 }
                 state.hasSearched && state.results.isEmpty() -> {
                     Box(
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("search_empty_state"),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
@@ -350,15 +472,28 @@ fun SearchScreen(
                         horizontalArrangement = Arrangement.spacedBy(14.dp),
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                         contentPadding = PaddingValues(bottom = 32.dp),
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("search_results_grid")
                     ) {
-                        items(
+                        itemsIndexed(
                             items = state.results,
-                            key = { "search_res_${it.hoshikaId}" }
-                        ) { anime ->
+                            key = { _, anime -> "search_res_${anime.hoshikaId}" }
+                        ) { _, anime ->
+                            val cardFocusRequester = remember(anime.hoshikaId) { FocusRequester() }
+                            LaunchedEffect(Unit) {
+                                if (state.lastSelectedResultId == anime.hoshikaId) {
+                                    runCatching { cardFocusRequester.requestFocus() }
+                                }
+                            }
                             TvAnimePosterCard(
                                 anime = anime,
-                                onClick = { onOpenAnimeDetails(anime.hoshikaId) }
+                                focusRequester = cardFocusRequester,
+                                onClick = {
+                                    viewModel.recordSelectedResult(anime.hoshikaId)
+                                    onOpenAnimeDetails(anime.hoshikaId)
+                                },
+                                modifier = Modifier.testTag("search_result_card_${anime.hoshikaId}")
                             )
                         }
                     }

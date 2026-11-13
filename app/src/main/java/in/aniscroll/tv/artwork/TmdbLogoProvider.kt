@@ -1,5 +1,6 @@
 package `in`.aniscroll.tv.artwork
 
+import `in`.aniscroll.tv.core.network.NetworkModule
 import `in`.aniscroll.tv.data.remote.AniScrollApi
 import `in`.aniscroll.tv.data.remote.TmdbApi
 import `in`.aniscroll.tv.domain.model.Anime
@@ -15,16 +16,29 @@ import kotlin.math.abs
  */
 class TmdbLogoProvider(
     private val tmdbApi: TmdbApi,
-    private val aniScrollApi: AniScrollApi? = null
+    private val aniScrollApi: AniScrollApi? = null,
+    private val hasValidCredentials: () -> Boolean = { NetworkModule.hasValidTmdbCredentials() }
 ) {
 
-    suspend fun findAndSelectLogo(anime: Anime, excludedUrl: String? = null): LogoInfo? {
-        val verifiedTvId = resolveVerifiedTmdbTvId(anime) ?: return null
-        return fetchBestLogoForTvId(
-            hoshikaId = anime.hoshikaId,
-            tvId = verifiedTvId,
-            excludedUrl = excludedUrl
-        )
+    suspend fun findAndSelectLogo(
+        anime: Anime,
+        excludedUrl: String? = null,
+        excludedUrls: Set<String> = emptySet()
+    ): LogoInfo? {
+        val allExcluded = buildExcludedSet(excludedUrl, excludedUrls)
+        val verifiedTvId = resolveVerifiedTmdbTvId(anime)
+        if (verifiedTvId != null && verifiedTvId > 0L) {
+            val logo = fetchBestLogoForTvId(
+                hoshikaId = anime.hoshikaId,
+                tvId = verifiedTvId,
+                excludedUrls = allExcluded,
+                anilistId = anime.anilistId
+            )
+            if (logo != null) return logo
+        }
+
+        // Optional fallback to verified AniScroll backend /api/tmdb/anime route if configured
+        return fetchBackendTmdbArtworkLogo(anime, allExcluded)
     }
 
     suspend fun resolveVerifiedTmdbTvId(anime: Anime): Long? {
@@ -33,66 +47,77 @@ class TmdbLogoProvider(
         }
         if (knownTmdbId != null) {
             LogoLogger.d(
-                "HoshikaID=${anime.hoshikaId} title='${anime.preferredTitle}' using pre-verified TMDB TV ID=$knownTmdbId"
+                "HoshikaID=${anime.hoshikaId} AniListID=${anime.anilistId} title='${anime.preferredTitle}' using pre-verified TMDB TV ID=$knownTmdbId"
             )
             return knownTmdbId
+        }
+
+        if (!hasValidCredentials()) {
+            LogoLogger.w(
+                "HoshikaID=${anime.hoshikaId} AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> TMDB search skipped: TMDB_API_KEY is missing or placeholder"
+            )
+            return null
         }
 
         return searchAndVerifyTvSeries(anime)
     }
 
     suspend fun searchAndVerifyTvSeries(anime: Anime): Long? {
+        if (!hasValidCredentials()) {
+            LogoLogger.w(
+                "HoshikaID=${anime.hoshikaId} AniListID=${anime.anilistId} -> Cannot search TMDB: credentials missing"
+            )
+            return null
+        }
+
         val candidateQueries = buildCandidateSearchQueries(anime)
         if (candidateQueries.isEmpty()) {
-            LogoLogger.w("HoshikaID=${anime.hoshikaId} has no valid titles for TMDB search")
+            LogoLogger.w(
+                "HoshikaID=${anime.hoshikaId} AniListID=${anime.anilistId} has no valid titles for TMDB search"
+            )
             return null
         }
 
         for (queryTitle in candidateQueries) {
-            val rawJson = executeTmdbSearch(queryTitle)
+            val rawJson = executeTmdbSearch(anime, queryTitle)
             if (rawJson.isNullOrBlank()) continue
 
             val matchedId = verifyMatchingSeries(rawJson, anime, queryTitle)
             if (matchedId != null && matchedId > 0L) {
                 LogoLogger.i(
-                    "HoshikaID=${anime.hoshikaId} title='${anime.preferredTitle}' -> Matched TMDB TV ID=$matchedId (query='$queryTitle')"
+                    "HoshikaID=${anime.hoshikaId} AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Selected TMDB TV ID=$matchedId (query='$queryTitle')"
                 )
                 return matchedId
             }
         }
 
         LogoLogger.w(
-            "HoshikaID=${anime.hoshikaId} title='${anime.preferredTitle}' -> TMDB search found no validated TV match"
+            "HoshikaID=${anime.hoshikaId} AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Fallback reason: TMDB search returned no validated anime TV series match"
         )
         return null
     }
 
-    private suspend fun executeTmdbSearch(query: String): String? {
+    private suspend fun executeTmdbSearch(anime: Anime, query: String): String? {
         try {
             val response = tmdbApi.searchTv(query = query, firstAirDateYear = null)
-            LogoLogger.d("TMDB search status=${response.code()} for query='$query'")
+            LogoLogger.d(
+                "HoshikaID=${anime.hoshikaId} AniListID=${anime.anilistId} -> TMDB search status=${response.code()} for query='$query'"
+            )
             if (response.isSuccessful) {
                 val body = response.body()?.string()?.trim()
                 if (!body.isNullOrBlank() && body.startsWith("{")) {
                     return body
                 }
+            } else {
+                LogoLogger.w(
+                    "HoshikaID=${anime.hoshikaId} -> TMDB search HTTP ${response.code()} for query='$query'"
+                )
             }
         } catch (e: Exception) {
-            LogoLogger.w("TMDB search exception for query='$query': ${e.message}", e)
-        }
-
-        if (aniScrollApi != null) {
-            try {
-                val proxyResp = aniScrollApi.searchTmdbTv(query = query, year = null)
-                if (proxyResp.isSuccessful) {
-                    val body = proxyResp.body()?.string()?.trim()
-                    if (!body.isNullOrBlank() && body.startsWith("{")) {
-                        return body
-                    }
-                }
-            } catch (e: Exception) {
-                LogoLogger.w("TMDB proxy search exception for query='$query': ${e.message}")
-            }
+            LogoLogger.w(
+                "HoshikaID=${anime.hoshikaId} -> TMDB search exception for query='$query': ${e.message}",
+                e
+            )
         }
         return null
     }
@@ -238,70 +263,132 @@ class TmdbLogoProvider(
     suspend fun fetchBestLogoForTvId(
         hoshikaId: Long,
         tvId: Long,
-        excludedUrl: String? = null
+        excludedUrl: String? = null,
+        excludedUrls: Set<String> = emptySet(),
+        anilistId: Long? = null
     ): LogoInfo? {
         if (tvId <= 0L) return null
+        if (!hasValidCredentials()) {
+            LogoLogger.w(
+                "HoshikaID=$hoshikaId AniListID=$anilistId tvId=$tvId -> TMDB images request skipped: TMDB_API_KEY is missing or placeholder"
+            )
+            return null
+        }
 
-        val rawJson = executeTmdbImagesRequest(tvId) ?: return null
+        val allExcluded = buildExcludedSet(excludedUrl, excludedUrls)
+        val rawJson = executeTmdbImagesRequest(hoshikaId, tvId, anilistId) ?: return null
         return parseAndSelectBestLogo(
             rawJson = rawJson,
             hoshikaId = hoshikaId,
             tvId = tvId,
-            excludedUrl = excludedUrl
+            excludedUrls = allExcluded,
+            anilistId = anilistId
         )
     }
 
-    private suspend fun executeTmdbImagesRequest(tvId: Long): String? {
+    private suspend fun executeTmdbImagesRequest(
+        hoshikaId: Long,
+        tvId: Long,
+        anilistId: Long?
+    ): String? {
         try {
             val response = tmdbApi.getTvImages(tvId = tvId, includeImageLanguage = "en,null,ja")
-            LogoLogger.d("TMDB images request status=${response.code()} for tvId=$tvId")
+            LogoLogger.d(
+                "HoshikaID=$hoshikaId AniListID=$anilistId tvId=$tvId -> TMDB image request status=${response.code()}"
+            )
             if (response.isSuccessful) {
                 val body = response.body()?.string()?.trim()
                 if (!body.isNullOrBlank() && body.startsWith("{")) {
                     return body
                 }
+            } else {
+                LogoLogger.w(
+                    "HoshikaID=$hoshikaId AniListID=$anilistId tvId=$tvId -> Fallback reason: TMDB images returned HTTP ${response.code()}"
+                )
             }
         } catch (e: Exception) {
-            LogoLogger.w("TMDB images request exception for tvId=$tvId: ${e.message}", e)
-        }
-
-        if (aniScrollApi != null) {
-            try {
-                val proxyResp = aniScrollApi.getTmdbTvImages(tvId = tvId, includeImageLanguage = "en,null,ja")
-                if (proxyResp.isSuccessful) {
-                    val body = proxyResp.body()?.string()?.trim()
-                    if (!body.isNullOrBlank() && body.startsWith("{")) {
-                        return body
-                    }
-                }
-            } catch (e: Exception) {
-                LogoLogger.w("TMDB proxy images exception for tvId=$tvId: ${e.message}")
-            }
+            LogoLogger.w(
+                "HoshikaID=$hoshikaId AniListID=$anilistId tvId=$tvId -> Fallback reason: TMDB images exception (${e.message})",
+                e
+            )
         }
         return null
+    }
+
+    internal suspend fun fetchBackendTmdbArtworkLogo(
+        anime: Anime,
+        excludedUrls: Set<String> = emptySet()
+    ): LogoInfo? {
+        val api = aniScrollApi ?: return null
+        return try {
+            val resp = api.getTmdbAnimeArtwork(
+                malId = anime.malId,
+                title = anime.preferredTitle
+            )
+            if (!resp.isSuccessful) return null
+            val body = resp.body()?.string()?.trim() ?: return null
+            if (!body.startsWith("{")) return null
+
+            val root = JSONObject(body)
+            val dataObj = root.optJSONObject("data") ?: root
+            val logoUrl = dataObj.optString("logo", "").trim().takeIf {
+                it.isNotEmpty() &&
+                    !it.equals("null", ignoreCase = true) &&
+                    (it.startsWith("https://") || it.startsWith("http://")) &&
+                    it !in excludedUrls
+            } ?: return null
+
+            LogoLogger.i(
+                "HoshikaID=${anime.hoshikaId} AniListID=${anime.anilistId} -> Resolved logo via AniScroll /api/tmdb/anime host=${LogoLogger.extractHost(logoUrl)}"
+            )
+            LogoInfo(
+                hoshikaId = anime.hoshikaId,
+                tmdbId = anime.tmdbId,
+                provider = "TMDB",
+                logoUrl = logoUrl,
+                language = "en",
+                width = 800,
+                height = 310,
+                lastUpdated = System.currentTimeMillis(),
+                isValid = true
+            )
+        } catch (_: Exception) {
+            null
+        }
     }
 
     internal fun parseAndSelectBestLogo(
         rawJson: String,
         hoshikaId: Long,
         tvId: Long,
-        excludedUrl: String? = null
+        excludedUrl: String? = null,
+        excludedUrls: Set<String> = emptySet(),
+        anilistId: Long? = null
     ): LogoInfo? {
+        val allExcluded = buildExcludedSet(excludedUrl, excludedUrls)
         return try {
             val root = JSONObject(rawJson.trim())
             val logos = root.optJSONArray("logos")
             val totalLogos = logos?.length() ?: 0
-            LogoLogger.d("HoshikaID=$hoshikaId tvId=$tvId -> Number of TMDB logos=$totalLogos")
-            if (logos == null || totalLogos == 0) return null
+            LogoLogger.d(
+                "HoshikaID=$hoshikaId AniListID=$anilistId tvId=$tvId -> Number of TMDB logos=$totalLogos"
+            )
+            if (logos == null || totalLogos == 0) {
+                LogoLogger.i(
+                    "HoshikaID=$hoshikaId AniListID=$anilistId tvId=$tvId -> Fallback reason: TMDB returned 0 logos"
+                )
+                return null
+            }
 
             data class CandidateLogo(
                 val fullUrl: String,
                 val lang: String?,
+                val format: String,
+                val formatPriority: Int,
                 val width: Int,
                 val height: Int,
                 val aspectRatio: Double,
-                val voteAverage: Double,
-                val isPng: Boolean
+                val voteAverage: Double
             )
 
             val candidates = mutableListOf<CandidateLogo>()
@@ -314,8 +401,9 @@ class TmdbLogoProvider(
                 val cleanPath = rawPath.trimStart('/')
                 if (cleanPath.isEmpty()) continue
 
+                val formatInfo = detectSupportedLogoFormat(cleanPath) ?: continue
                 val fullUrl = "https://image.tmdb.org/t/p/original/$cleanPath"
-                if (excludedUrl != null && fullUrl == excludedUrl) continue
+                if (fullUrl in allExcluded) continue
 
                 val width = obj.optInt("width", 0)
                 val height = obj.optInt("height", 0)
@@ -336,26 +424,31 @@ class TmdbLogoProvider(
                 }
 
                 val vote = obj.optDouble("vote_average", 0.0).let { if (it.isNaN()) 0.0 else it }
-                val isPng = cleanPath.endsWith(".png", ignoreCase = true)
                 candidates.add(
                     CandidateLogo(
                         fullUrl = fullUrl,
                         lang = rawLang,
+                        format = formatInfo.first,
+                        formatPriority = formatInfo.second,
                         width = width,
                         height = height,
                         aspectRatio = aspect,
-                        voteAverage = vote,
-                        isPng = isPng
+                        voteAverage = vote
                     )
                 )
             }
 
             if (candidates.isEmpty()) {
-                LogoLogger.w("HoshikaID=$hoshikaId tvId=$tvId -> 0 suitable TMDB logo candidates after filtering")
+                LogoLogger.w(
+                    "HoshikaID=$hoshikaId AniListID=$anilistId tvId=$tvId -> Fallback reason: 0 suitable TMDB logo candidates after format/aspect/exclusion filtering"
+                )
                 return null
             }
 
-            // Priority: 1. English ("en"), 2. Japanese ("ja"), 3. Language-neutral (null / "" / "xx"), 4. Other
+            // Priority:
+            // 1. Language: English ("en") -> Japanese ("ja") -> Language-neutral (null / "" / "xx") -> Other
+            // 2. Format: PNG (0) -> SVG (1) -> WEBP (2) -> JPG (3)
+            // 3. Vote average & width
             val selected = candidates.sortedWith(
                 compareBy<CandidateLogo> {
                     when (it.lang?.lowercase(Locale.ROOT)) {
@@ -364,13 +457,13 @@ class TmdbLogoProvider(
                         null, "", "xx" -> 2
                         else -> 3
                     }
-                }.thenByDescending { it.isPng }
+                }.thenBy { it.formatPriority }
                     .thenByDescending { it.voteAverage }
                     .thenByDescending { it.width }
             ).first()
 
             LogoLogger.i(
-                "HoshikaID=$hoshikaId tvId=$tvId -> Selected TMDB logo lang='${selected.lang ?: "neutral"}' (${selected.width}x${selected.height}) host=${LogoLogger.extractHost(selected.fullUrl)}"
+                "HoshikaID=$hoshikaId AniListID=$anilistId tvId=$tvId -> Selected TMDB logo lang='${selected.lang ?: "neutral"}' format=${selected.format} (${selected.width}x${selected.height}) host=${LogoLogger.extractHost(selected.fullUrl)}"
             )
 
             LogoInfo(
@@ -385,9 +478,28 @@ class TmdbLogoProvider(
                 isValid = true
             )
         } catch (e: Exception) {
-            LogoLogger.e("Failed parsing TMDB logos for HoshikaID=$hoshikaId tvId=$tvId: ${e.message}", e)
+            LogoLogger.e(
+                "Failed parsing TMDB logos for HoshikaID=$hoshikaId AniListID=$anilistId tvId=$tvId: ${e.message}",
+                e
+            )
             null
         }
+    }
+
+    internal fun detectSupportedLogoFormat(pathOrUrl: String): Pair<String, Int>? {
+        val clean = pathOrUrl.substringBefore('?').lowercase(Locale.ROOT)
+        return when {
+            clean.endsWith(".png") -> "PNG" to 0
+            clean.endsWith(".svg") -> "SVG" to 1
+            clean.endsWith(".webp") -> "WEBP" to 2
+            clean.endsWith(".jpg") || clean.endsWith(".jpeg") -> "JPG" to 3
+            else -> null
+        }
+    }
+
+    private fun buildExcludedSet(excludedUrl: String?, excludedUrls: Set<String>): Set<String> {
+        if (excludedUrl.isNullOrBlank()) return excludedUrls
+        return excludedUrls + excludedUrl
     }
 
     internal fun stripSeasonOrArcSuffix(title: String): String {

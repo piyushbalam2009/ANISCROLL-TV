@@ -4,19 +4,19 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -30,29 +30,38 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import coil.compose.AsyncImage
+import coil.request.CachePolicy
 import coil.request.ImageRequest
+import `in`.aniscroll.tv.artwork.AnimeLogo
 import `in`.aniscroll.tv.core.designsystem.TvAnimePosterCard
 import `in`.aniscroll.tv.core.designsystem.TvColors
 import `in`.aniscroll.tv.core.designsystem.TvErrorBanner
 import `in`.aniscroll.tv.core.designsystem.TvFocusableButton
 import `in`.aniscroll.tv.core.designsystem.TvLoadingIndicator
-import `in`.aniscroll.tv.core.designsystem.TvTitleLogoOrText
 import `in`.aniscroll.tv.data.local.UiPreviewFixtures
 import `in`.aniscroll.tv.data.repository.AnimeRepository
 import `in`.aniscroll.tv.data.repository.HomeSectionRow
@@ -74,7 +83,8 @@ data class HomeUiState(
     val isUsingDevFixtures: Boolean = false,
     val errorMessage: String? = null,
     val lastFocusedRowIndex: Int = -1,
-    val lastFocusedItemId: Long = -1L
+    val lastFocusedItemId: Long = -1L,
+    val shouldRestoreCardFocus: Boolean = false
 )
 
 class HomeViewModel(
@@ -151,6 +161,32 @@ class HomeViewModel(
             it.copy(lastFocusedRowIndex = rowIndex, lastFocusedItemId = hoshikaId)
         }
     }
+
+    fun markCardClickedForReturnFocus(rowIndex: Int, hoshikaId: Long) {
+        _uiState.update {
+            it.copy(
+                lastFocusedRowIndex = rowIndex,
+                lastFocusedItemId = hoshikaId,
+                shouldRestoreCardFocus = true
+            )
+        }
+    }
+
+    fun consumeCardFocusRestore() {
+        _uiState.update {
+            it.copy(shouldRestoreCardFocus = false)
+        }
+    }
+
+    fun onHeroFocused() {
+        _uiState.update {
+            it.copy(
+                lastFocusedRowIndex = -1,
+                lastFocusedItemId = -1L,
+                shouldRestoreCardFocus = false
+            )
+        }
+    }
 }
 
 @Composable
@@ -164,14 +200,26 @@ fun HomeScreen(
     val continueWatching by viewModel.continueWatching.collectAsStateWithLifecycle()
     val watchlist by viewModel.watchlist.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
 
     val heroPlayFocusRequester = remember { FocusRequester() }
+    val firstRowFirstCardFocusRequester = remember { FocusRequester() }
+    var hasRequestedInitialHeroFocus by rememberSaveable { mutableStateOf(false) }
 
-    Box(
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
             .background(TvColors.MainBackground)
     ) {
+        // Responsive dimensions across 720p, 1080p, and 4K displays
+        val heroHeight = (maxHeight * 0.52f).coerceIn(248.dp, 336.dp)
+        val heroContentMaxWidth = (maxWidth * 0.58f).coerceIn(340.dp, 580.dp)
+        val logoMaxWidth = (heroContentMaxWidth * 0.72f).coerceIn(190.dp, 310.dp)
+        val logoMaxHeight = (heroHeight * 0.24f).coerceIn(48.dp, 74.dp)
+
+        val hasContinueWatchingRow = continueWatching.isNotEmpty()
+        val hasAnyContentRow = hasContinueWatchingRow || state.sections.any { it.items.isNotEmpty() }
+
         when {
             state.isLoading -> {
                 TvLoadingIndicator(
@@ -210,13 +258,15 @@ fun HomeScreen(
             else -> {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("home_lazy_column"),
                     contentPadding = PaddingValues(bottom = 48.dp),
-                    verticalArrangement = Arrangement.spacedBy(28.dp)
+                    verticalArrangement = Arrangement.spacedBy(24.dp)
                 ) {
                     // Status banner if offline cache or dev fixture mode is active
                     if (state.isFromOfflineCache || state.isUsingDevFixtures) {
-                        item {
+                        item(key = "home_status_banner") {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -253,7 +303,20 @@ fun HomeScreen(
                             HomeHeroSection(
                                 anime = featured,
                                 isInWatchlist = isInMyList,
+                                heroHeight = heroHeight,
+                                contentMaxWidth = heroContentMaxWidth,
+                                logoMaxWidth = logoMaxWidth,
+                                logoMaxHeight = logoMaxHeight,
                                 playFocusRequester = heroPlayFocusRequester,
+                                downFocusRequester = if (hasAnyContentRow) firstRowFirstCardFocusRequester else null,
+                                onHeroFocused = {
+                                    viewModel.onHeroFocused()
+                                    coroutineScope.launch {
+                                        if (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0) {
+                                            listState.animateScrollToItem(0, 0)
+                                        }
+                                    }
+                                },
                                 onPlay = { onPlayEpisode(featured.hoshikaId, 1, null) },
                                 onDetails = { onOpenAnimeDetails(featured.hoshikaId) },
                                 onToggleWatchlist = { viewModel.toggleWatchlist(featured) },
@@ -263,10 +326,12 @@ fun HomeScreen(
                     }
 
                     // 2. Continue Watching Row (when local watch progress exists)
-                    if (continueWatching.isNotEmpty()) {
+                    if (hasContinueWatchingRow) {
                         item(key = "row_continue_watching") {
                             ContinueWatchingHomeRow(
                                 items = continueWatching,
+                                firstCardFocusRequester = firstRowFirstCardFocusRequester,
+                                upFocusRequester = if (state.featuredAnime != null) heroPlayFocusRequester else null,
                                 onResumeItem = { item ->
                                     onPlayEpisode(item.hoshikaId, item.episodeNumber, item.language)
                                 }
@@ -279,12 +344,20 @@ fun HomeScreen(
                         items = state.sections,
                         key = { index, section -> "section_${index}_${section.title}" }
                     ) { rowIndex, section ->
+                        val isFirstContentRowBelowHero = !hasContinueWatchingRow && rowIndex == 0
                         HomeAnimeContentRow(
                             title = section.title,
                             items = section.items,
-                            restoredFocusId = if (state.lastFocusedRowIndex == rowIndex) state.lastFocusedItemId else -1L,
+                            firstCardFocusRequester = if (isFirstContentRowBelowHero) firstRowFirstCardFocusRequester else null,
+                            upFocusRequester = if (isFirstContentRowBelowHero && state.featuredAnime != null) heroPlayFocusRequester else null,
+                            restoredFocusId = if (state.shouldRestoreCardFocus && state.lastFocusedRowIndex == rowIndex) {
+                                state.lastFocusedItemId
+                            } else {
+                                -1L
+                            },
+                            onConsumeRestoreFocus = { viewModel.consumeCardFocusRestore() },
                             onAnimeClick = { anime ->
-                                viewModel.recordFocusedCard(rowIndex, anime.hoshikaId)
+                                viewModel.markCardClickedForReturnFocus(rowIndex, anime.hoshikaId)
                                 onOpenAnimeDetails(anime.hoshikaId)
                             },
                             onAnimeFocused = { anime ->
@@ -295,7 +368,8 @@ fun HomeScreen(
                 }
 
                 LaunchedEffect(state.featuredAnime?.hoshikaId) {
-                    if (state.lastFocusedItemId <= 0L && state.featuredAnime != null) {
+                    if (!hasRequestedInitialHeroFocus && !state.shouldRestoreCardFocus && state.featuredAnime != null) {
+                        hasRequestedInitialHeroFocus = true
                         runCatching { heroPlayFocusRequester.requestFocus() }
                     }
                 }
@@ -308,34 +382,68 @@ fun HomeScreen(
 private fun HomeHeroSection(
     anime: Anime,
     isInWatchlist: Boolean,
+    heroHeight: Dp,
+    contentMaxWidth: Dp,
+    logoMaxWidth: Dp,
+    logoMaxHeight: Dp,
     playFocusRequester: FocusRequester,
+    downFocusRequester: FocusRequester?,
+    onHeroFocused: () -> Unit,
     onPlay: () -> Unit,
     onDetails: () -> Unit,
     onToggleWatchlist: () -> Unit,
     onLogoLoadFailed: (String) -> Unit
 ) {
+    val context = LocalContext.current
+    val artworkUrl = anime.bannerUrl?.takeIf { it.isNotBlank() } ?: anime.posterUrl?.takeIf { it.isNotBlank() }
+    val backdropRequest = remember(context, artworkUrl) {
+        artworkUrl?.let { url ->
+            ImageRequest.Builder(context)
+                .data(url)
+                .crossfade(true)
+                .diskCachePolicy(CachePolicy.ENABLED)
+                .memoryCachePolicy(CachePolicy.ENABLED)
+                .size(1920, 1080)
+                .build()
+        }
+    }
+
+    val heroButtonFocusModifier = Modifier
+        .then(
+            if (downFocusRequester != null) {
+                Modifier.focusProperties { down = downFocusRequester }
+            } else {
+                Modifier
+            }
+        )
+        .onFocusChanged { focusState ->
+            if (focusState.isFocused) {
+                onHeroFocused()
+            }
+        }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(340.dp)
+            .height(heroHeight)
+            .clip(RectangleShape)
             .background(TvColors.SecondaryBackground)
+            .testTag("home_hero_section")
     ) {
-        // Wide Hoshika background artwork
-        val artworkUrl = anime.bannerUrl ?: anime.posterUrl
-        if (!artworkUrl.isNullOrBlank()) {
+        // Wide Hoshika backdrop artwork constrained and cropped inside hero container
+        if (backdropRequest != null) {
             AsyncImage(
-                model = ImageRequest.Builder(LocalContext.current)
-                    .data(artworkUrl)
-                    .crossfade(true)
-                    .size(1280, 720)
-                    .build(),
+                model = backdropRequest,
                 contentDescription = anime.preferredTitle,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
+                alignment = Alignment.TopCenter,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("home_hero_backdrop")
             )
         }
 
-        // Cinematic dark gradient overlays (left-to-right and bottom-to-top)
+        // Cinematic dark gradient overlays (left-to-right and top-to-bottom) for contrast
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -344,7 +452,7 @@ private fun HomeHeroSection(
                         colors = listOf(
                             TvColors.MainBackground,
                             TvColors.MainBackground.copy(alpha = 0.88f),
-                            TvColors.MainBackground.copy(alpha = 0.35f),
+                            TvColors.MainBackground.copy(alpha = 0.42f),
                             Color.Transparent
                         )
                     )
@@ -356,35 +464,40 @@ private fun HomeHeroSection(
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
+                            TvColors.MainBackground.copy(alpha = 0.25f),
                             Color.Transparent,
-                            TvColors.MainBackground.copy(alpha = 0.65f),
+                            TvColors.MainBackground.copy(alpha = 0.72f),
                             TvColors.MainBackground
                         )
                     )
                 )
         )
 
-        // Hero metadata & actions
+        // Hero content column strictly bounded inside the hero container
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .widthIn(max = 620.dp)
-                .padding(horizontal = 32.dp, vertical = 24.dp)
+                .fillMaxHeight()
+                .widthIn(max = contentMaxWidth)
+                .padding(horizontal = 32.dp, vertical = 18.dp)
+                .testTag("home_hero_content"),
+            verticalArrangement = Arrangement.Bottom,
+            horizontalAlignment = Alignment.Start
         ) {
-            // Shared Transparent Title Logo from TMDB/Fanart or clean white typography fallback
-            `in`.aniscroll.tv.artwork.AnimeLogo(
+            // 1. Transparent Title Logo from TMDB/Fanart or clean white typography fallback
+            AnimeLogo(
                 hoshikaId = anime.hoshikaId,
                 animeTitle = anime.preferredTitle,
                 logoUrl = anime.logoUrl,
                 contentDescription = anime.preferredTitle,
-                maxWidth = 360.dp,
-                maxHeight = 88.dp,
+                maxWidth = logoMaxWidth,
+                maxHeight = logoMaxHeight,
                 onLogoLoadFailed = onLogoLoadFailed
             )
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Metadata row: Year • Status • Genres
+            // 2. Metadata row: Year • Status • Format • Genres
             val metaParts = buildList {
                 anime.releaseYear?.let { add(it.toString()) }
                 anime.status?.takeIf { it.isNotBlank() }?.let { add(it) }
@@ -397,23 +510,30 @@ private fun HomeHeroSection(
                 Text(
                     text = metaParts.joinToString("  •  "),
                     style = MaterialTheme.typography.labelLarge,
-                    color = TvColors.SecondaryText
+                    color = TvColors.SecondaryText,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("home_hero_metadata")
                 )
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(6.dp))
             }
 
+            // 3. Short description (2–3 lines max)
             if (!anime.description.isNullOrBlank()) {
                 Text(
                     text = anime.description,
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = TvColors.SecondaryText,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("home_hero_description")
                 )
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(14.dp))
+            } else {
+                Spacer(modifier = Modifier.height(8.dp))
             }
 
-            // Action Buttons: Play, Details, Add to My List
+            // 4. Action Buttons: Play, Details, Add to My List
             Row(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -424,19 +544,19 @@ private fun HomeHeroSection(
                     isPrimary = true,
                     focusRequester = playFocusRequester,
                     onClick = onPlay,
-                    modifier = Modifier.testTag("hero_play_button")
+                    modifier = heroButtonFocusModifier.testTag("hero_play_button")
                 )
                 TvFocusableButton(
                     text = "Details",
                     icon = Icons.Default.Info,
                     onClick = onDetails,
-                    modifier = Modifier.testTag("hero_details_button")
+                    modifier = heroButtonFocusModifier.testTag("hero_details_button")
                 )
                 TvFocusableButton(
                     text = if (isInWatchlist) "In My List" else "Add to My List",
                     icon = if (isInWatchlist) Icons.Default.Check else Icons.Default.Add,
                     onClick = onToggleWatchlist,
-                    modifier = Modifier.testTag("hero_watchlist_button")
+                    modifier = heroButtonFocusModifier.testTag("hero_watchlist_button")
                 )
             }
         }
@@ -446,6 +566,8 @@ private fun HomeHeroSection(
 @Composable
 private fun ContinueWatchingHomeRow(
     items: List<WatchProgressItem>,
+    firstCardFocusRequester: FocusRequester?,
+    upFocusRequester: FocusRequester?,
     onResumeItem: (WatchProgressItem) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -460,10 +582,10 @@ private fun ContinueWatchingHomeRow(
             contentPadding = PaddingValues(horizontal = 32.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            items(
+            itemsIndexed(
                 items = items,
-                key = { "cw_${it.hoshikaId}_${it.episodeNumber}" }
-            ) { item ->
+                key = { _, item -> "cw_${item.hoshikaId}_${item.episodeNumber}" }
+            ) { index, item ->
                 val cardAnime = Anime(
                     hoshikaId = item.hoshikaId,
                     anilistId = item.anilistId,
@@ -473,11 +595,18 @@ private fun ContinueWatchingHomeRow(
                     bannerUrl = item.bannerUrl,
                     logoUrl = item.logoUrl
                 )
+                val upMod = if (upFocusRequester != null) {
+                    Modifier.focusProperties { up = upFocusRequester }
+                } else {
+                    Modifier
+                }
                 TvAnimePosterCard(
                     anime = cardAnime,
                     subtitleBadge = "EP ${item.episodeNumber} • ${item.language.uppercase()}",
                     progressFraction = item.progressFraction,
-                    onClick = { onResumeItem(item) }
+                    focusRequester = if (index == 0) firstCardFocusRequester else null,
+                    onClick = { onResumeItem(item) },
+                    modifier = upMod.testTag("continue_watching_card_${item.hoshikaId}")
                 )
             }
         }
@@ -488,7 +617,10 @@ private fun ContinueWatchingHomeRow(
 private fun HomeAnimeContentRow(
     title: String,
     items: List<Anime>,
+    firstCardFocusRequester: FocusRequester?,
+    upFocusRequester: FocusRequester?,
     restoredFocusId: Long,
+    onConsumeRestoreFocus: () -> Unit,
     onAnimeClick: (Anime) -> Unit,
     onAnimeFocused: (Anime) -> Unit
 ) {
@@ -504,21 +636,34 @@ private fun HomeAnimeContentRow(
             contentPadding = PaddingValues(horizontal = 32.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            items(
+            itemsIndexed(
                 items = items,
-                key = { "${title}_${it.hoshikaId}" }
-            ) { anime ->
-                val focusRequester = remember(anime.hoshikaId) { FocusRequester() }
+                key = { _, anime -> "${title}_${anime.hoshikaId}" }
+            ) { index, anime ->
+                val cardFocusRequester = remember(anime.hoshikaId, index, firstCardFocusRequester) {
+                    if (index == 0 && firstCardFocusRequester != null) {
+                        firstCardFocusRequester
+                    } else {
+                        FocusRequester()
+                    }
+                }
                 LaunchedEffect(restoredFocusId) {
                     if (restoredFocusId == anime.hoshikaId) {
-                        runCatching { focusRequester.requestFocus() }
+                        onConsumeRestoreFocus()
+                        runCatching { cardFocusRequester.requestFocus() }
                     }
+                }
+                val upMod = if (upFocusRequester != null) {
+                    Modifier.focusProperties { up = upFocusRequester }
+                } else {
+                    Modifier
                 }
                 TvAnimePosterCard(
                     anime = anime,
-                    focusRequester = focusRequester,
+                    focusRequester = cardFocusRequester,
                     onClick = { onAnimeClick(anime) },
-                    onFocused = { onAnimeFocused(anime) }
+                    onFocused = { onAnimeFocused(anime) },
+                    modifier = upMod.testTag("home_card_${anime.hoshikaId}")
                 )
             }
         }

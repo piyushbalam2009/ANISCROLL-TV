@@ -56,10 +56,23 @@ class BoundedRetryInterceptor(
 
 object NetworkModule {
 
-    private fun isConfiguredSecret(value: String?): Boolean {
-        return !value.isNullOrBlank() &&
-            !value.startsWith("MY_") &&
-            !value.equals("null", ignoreCase = true)
+    fun isConfiguredSecret(value: String?): Boolean {
+        val trimmed = value?.trim()
+        return !trimmed.isNullOrEmpty() &&
+            !trimmed.startsWith("MY_", ignoreCase = true) &&
+            !trimmed.startsWith("YOUR_", ignoreCase = true) &&
+            !trimmed.equals("null", ignoreCase = true) &&
+            !trimmed.equals("PLACEHOLDER", ignoreCase = true)
+    }
+
+    fun hasValidTmdbCredentials(): Boolean {
+        val key = runCatching { BuildConfig.TMDB_API_KEY }.getOrNull()
+        return isConfiguredSecret(key)
+    }
+
+    fun hasValidFanartCredentials(): Boolean {
+        val key = runCatching { BuildConfig.FANART_API_KEY }.getOrNull()
+        return isConfiguredSecret(key)
     }
 
     private val okHttpClient: OkHttpClient by lazy {
@@ -134,9 +147,11 @@ object NetworkModule {
             .create(HoshikaApi::class.java)
     }
 
+    const val ANISCROLL_STREAMING_BASE_URL = "https://anivault-scraper-five.vercel.app/"
+
     val aniScrollApi: AniScrollApi by lazy {
         Retrofit.Builder()
-            .baseUrl("https://api.aniscroll.in/")
+            .baseUrl(ANISCROLL_STREAMING_BASE_URL)
             .client(okHttpClient)
             .build()
             .create(AniScrollApi::class.java)

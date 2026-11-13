@@ -3,9 +3,11 @@ package `in`.aniscroll.tv.player
 import android.content.Context
 import android.net.Uri
 import androidx.annotation.OptIn
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -15,27 +17,68 @@ import `in`.aniscroll.tv.domain.model.StreamData
 import `in`.aniscroll.tv.domain.model.SubtitleTrack
 
 /**
- * Manages the shared AndroidX Media3 ExoPlayer instance, HLS media sources,
- * custom HTTP headers, and external subtitle track configurations (Section 18 & 29).
+ * Manages the single shared AndroidX Media3 ExoPlayer instance, HLS media sources,
+ * custom HTTP headers, external subtitle configurations, and deterministic lifecycle teardown.
  */
 @OptIn(UnstableApi::class)
 class ExoPlayerManager(private val context: Context) {
 
+    @Volatile
     private var exoPlayer: ExoPlayer? = null
 
+    @Volatile
+    private var attachedListener: Player.Listener? = null
+
+    private val lock = Any()
+
+    fun setPlayerListener(listener: Player.Listener) {
+        synchronized(lock) {
+            val current = exoPlayer
+            val previous = attachedListener
+            if (current != null && previous != null && previous !== listener) {
+                current.removeListener(previous)
+            }
+            attachedListener = listener
+            if (current != null && previous !== listener) {
+                current.addListener(listener)
+            }
+        }
+    }
+
+    /**
+     * Returns the existing ExoPlayer without creating a new instance.
+     * Always use this inside teardown, background, and polling paths.
+     */
+    fun peekPlayer(): ExoPlayer? = exoPlayer
+
     fun getOrCreatePlayer(): ExoPlayer {
-        return exoPlayer ?: ExoPlayer.Builder(context.applicationContext)
-            .setSeekBackIncrementMs(10_000L)
-            .setSeekForwardIncrementMs(10_000L)
-            .build()
-            .also { exoPlayer = it }
+        synchronized(lock) {
+            exoPlayer?.let { return it }
+
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build()
+
+            val created = ExoPlayer.Builder(context.applicationContext)
+                .setAudioAttributes(audioAttributes, true)
+                .setHandleAudioBecomingNoisy(true)
+                .setSeekBackIncrementMs(10_000L)
+                .setSeekForwardIncrementMs(10_000L)
+                .build()
+
+            attachedListener?.let { created.addListener(it) }
+            exoPlayer = created
+            return created
+        }
     }
 
     fun loadStream(
         streamData: StreamData,
         selectedSourceUrl: String,
         startPositionMs: Long = 0L,
-        playWhenReady: Boolean = true
+        playWhenReady: Boolean = true,
+        playbackSpeed: Float = 1.0f
     ) {
         val player = getOrCreatePlayer()
 
@@ -80,6 +123,7 @@ class ExoPlayerManager(private val context: Context) {
         }
 
         player.setMediaSource(mediaSource)
+        player.setPlaybackSpeed(playbackSpeed.coerceIn(0.25f, 3.0f))
         player.prepare()
         if (startPositionMs > 0L) {
             player.seekTo(startPositionMs)
@@ -106,8 +150,52 @@ class ExoPlayerManager(private val context: Context) {
             .build()
     }
 
+    /**
+     * Pauses active playback immediately without creating a player or allowing auto-resume.
+     */
+    fun pauseIfActive() {
+        synchronized(lock) {
+            val player = exoPlayer ?: return
+            player.playWhenReady = false
+            if (player.isPlaying) {
+                player.pause()
+            }
+        }
+    }
+
+    /**
+     * Stops playback and clears all loaded media items immediately.
+     */
+    fun stopAndClear() {
+        synchronized(lock) {
+            val player = exoPlayer ?: return
+            player.playWhenReady = false
+            player.pause()
+            player.stop()
+            player.clearMediaItems()
+        }
+    }
+
+    /**
+     * Safely stops, detaches listeners, releases ExoPlayer resources, and nulls the reference.
+     * Safe to invoke multiple times without crashing or leaking.
+     */
     fun releasePlayer() {
-        exoPlayer?.release()
-        exoPlayer = null
+        synchronized(lock) {
+            val player = exoPlayer ?: return
+            exoPlayer = null
+            runCatching {
+                attachedListener?.let { player.removeListener(it) }
+            }
+            runCatching {
+                player.playWhenReady = false
+                player.pause()
+                player.stop()
+                player.clearMediaItems()
+            }
+            runCatching {
+                player.release()
+            }
+        }
     }
 }

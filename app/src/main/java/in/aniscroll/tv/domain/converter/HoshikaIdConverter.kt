@@ -6,6 +6,11 @@ import `in`.aniscroll.tv.data.remote.AniScrollApi
 import `in`.aniscroll.tv.data.remote.JsonParsers
 import `in`.aniscroll.tv.domain.model.Anime
 
+data class ResolvedStreamingTarget(
+    val anilistId: Long,
+    val format: String?
+)
+
 /**
  * Dedicated Hoshika ID -> AniList ID Converter (Section 8).
  *
@@ -14,7 +19,7 @@ import `in`.aniscroll.tv.domain.model.Anime
  * 2. Never passes a Hoshika ID or MAL ID directly as an AniList ID.
  * 3. Checks local Room `anime_id_mappings` cache first.
  * 4. Checks Hoshika's `anilist_id` / `mal_id` fields, and resolves via the AniScroll backend
- *    (`https://api.aniscroll.in/api/anilist/id` or `https://api.aniscroll.in/api/search`) when
+ *    (`https://anivault-scraper-five.vercel.app/api/anilist/id` or `https://anivault-scraper-five.vercel.app/api/search`) when
  *    Hoshika's public v1 response only exposes `shortId`.
  * 5. Caches the verified mapping in Room (`anime_id_mappings`).
  */
@@ -37,32 +42,57 @@ class HoshikaIdConverter(
     }
 
     suspend fun convert(anime: Anime): Long? {
+        return resolveTarget(anime)?.anilistId
+    }
+
+    /**
+     * Resolves both the verified AniList ID and the anime format (e.g. "MOVIE", "TV", "SPECIAL", "OVA", "ONA")
+     * from existing metadata, Room cache, Hoshika details, or AniScroll's AniList search metadata.
+     */
+    suspend fun resolveTarget(anime: Anime): ResolvedStreamingTarget? {
         val hoshikaId = anime.hoshikaId
         if (hoshikaId <= 0L) return null
+
+        var resolvedFormat: String? = anime.format?.trim()?.takeIf { it.isNotEmpty() }
+            ?: dao.getCachedAnime(hoshikaId)?.format?.trim()?.takeIf { it.isNotEmpty() }
 
         // 1. Check Room cache first
         val cached = dao.getMapping(hoshikaId)
         if (cached != null && cached.anilistId > 0L) {
-            return cached.anilistId
+            if (resolvedFormat == null) {
+                resolvedFormat = fetchHoshikaAnimeDetails(hoshikaId)?.format?.trim()?.takeIf { it.isNotEmpty() }
+            }
+            return ResolvedStreamingTarget(anilistId = cached.anilistId, format = resolvedFormat)
         }
 
-        // 2. Direct anilistId from Hoshika metadata if present
+        // 2. Direct anilistId from metadata if present
         val directAnilist = anime.anilistId?.takeIf { it > 0L && it != hoshikaId }
         if (directAnilist != null) {
             saveMapping(hoshikaId, directAnilist)
-            return directAnilist
+            if (resolvedFormat == null) {
+                resolvedFormat = fetchHoshikaAnimeDetails(hoshikaId)?.format?.trim()?.takeIf { it.isNotEmpty() }
+            }
+            return ResolvedStreamingTarget(anilistId = directAnilist, format = resolvedFormat)
         }
 
         // 3. Ensure we have full Hoshika details (English/Romaji titles, episodes, format, malId)
-        val detailedAnime = if (anime.englishTitle.isNullOrBlank() && anime.totalEpisodes == null) {
+        val detailedAnime = if (
+            anime.englishTitle.isNullOrBlank() ||
+            anime.format.isNullOrBlank() ||
+            anime.totalEpisodes == null
+        ) {
             fetchHoshikaAnimeDetails(hoshikaId) ?: anime
         } else {
             anime
         }
 
+        if (resolvedFormat == null) {
+            resolvedFormat = detailedAnime.format?.trim()?.takeIf { it.isNotEmpty() }
+        }
+
         detailedAnime.anilistId?.takeIf { it > 0L && it != hoshikaId }?.let { resolved ->
             saveMapping(hoshikaId, resolved)
-            return resolved
+            return ResolvedStreamingTarget(anilistId = resolved, format = resolvedFormat)
         }
 
         // 4. If Hoshika exposed malId, resolve via AniScroll backend /api/anilist/id
@@ -70,7 +100,7 @@ class HoshikaIdConverter(
             val fromMal = resolveFromMalId(malId)
             if (fromMal != null && fromMal > 0L) {
                 saveMapping(hoshikaId, fromMal)
-                return fromMal
+                return ResolvedStreamingTarget(anilistId = fromMal, format = resolvedFormat)
             }
         }
 
@@ -82,10 +112,13 @@ class HoshikaIdConverter(
         ).distinct()
 
         for (query in candidateQueries) {
-            val resolvedId = resolveFromAniScrollSearch(query, detailedAnime)
-            if (resolvedId != null && resolvedId > 0L) {
-                saveMapping(hoshikaId, resolvedId)
-                return resolvedId
+            val match = resolveMatchFromAniScrollSearch(query, detailedAnime)
+            if (match != null && match.anilistId > 0L) {
+                saveMapping(hoshikaId, match.anilistId)
+                return ResolvedStreamingTarget(
+                    anilistId = match.anilistId,
+                    format = resolvedFormat ?: match.format
+                )
             }
         }
 
@@ -99,11 +132,14 @@ class HoshikaIdConverter(
         return JsonParsers.parseAniListIdFromMalResponse(body)
     }
 
-    private suspend fun resolveFromAniScrollSearch(query: String, targetAnime: Anime): Long? {
+    private suspend fun resolveMatchFromAniScrollSearch(
+        query: String,
+        targetAnime: Anime
+    ): JsonParsers.AniScrollSearchMatch? {
         val resp = runCatching { aniScrollApi.searchAnimeIds(query = query, limit = 10) }.getOrNull() ?: return null
         if (!resp.isSuccessful) return null
         val body = resp.body()?.string() ?: return null
-        return JsonParsers.parseAniScrollIdSearch(body, targetAnime)
+        return JsonParsers.parseAniScrollSearchMatch(body, targetAnime)
     }
 
     suspend fun cacheMappingIfValid(hoshikaId: Long, anilistId: Long?) {

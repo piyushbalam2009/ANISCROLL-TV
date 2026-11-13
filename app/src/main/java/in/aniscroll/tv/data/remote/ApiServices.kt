@@ -59,7 +59,7 @@ interface HoshikaApi {
     @GET("search")
     suspend fun search(
         @Query("q") query: String,
-        @Query("limit") limit: Int = 24,
+        @Query("limit") limit: Int = 20,
         @Query("format") format: String? = null,
         @Query("year") year: Int? = null,
         @Query("locale") locale: String = "en"
@@ -122,13 +122,22 @@ interface HoshikaApi {
 
 /**
  * AniScroll Streaming Backend API
- * Base URL: https://api.aniscroll.in/
- * Endpoint: GET https://api.aniscroll.in/api/watch/zokoanime/{anilist_id}/{episode}/{sub|dub}
+ * Base URL: https://anivault-scraper-five.vercel.app/
+ * Routing rules:
+ * - Movies (format == MOVIE): GET https://anivault-scraper-five.vercel.app/api/watch/zokoanime/{anilist_id}/{episode}/{sub|dub}
+ * - TV series, specials, and episodic anime: GET https://anivault-scraper-five.vercel.app/api/watch/megaplay/{anilist_id}/{episode}/{sub|dub}
  */
 interface AniScrollApi {
 
     @GET("api/watch/zokoanime/{anilistId}/{episode}/{language}")
-    suspend fun getEpisodeStreams(
+    suspend fun getZokoAnimeStreams(
+        @Path("anilistId") anilistId: Long,
+        @Path("episode") episode: Int,
+        @Path("language") language: String
+    ): Response<ResponseBody>
+
+    @GET("api/watch/megaplay/{anilistId}/{episode}/{language}")
+    suspend fun getMegaPlayStreams(
         @Path("anilistId") anilistId: Long,
         @Path("episode") episode: Int,
         @Path("language") language: String
@@ -161,23 +170,14 @@ interface AniScrollApi {
     ): Response<ResponseBody>
 
     /**
-     * Optional backend proxy routes for TMDB & Fanart.tv transparent title logos
+     * Verified AniScroll backend TMDB artwork endpoint documented on https://anivault-scraper-five.vercel.app
+     * Returns `{ "data": { "poster": "...", "cover": "...", "logo": "https://image.tmdb.org/t/p/original/..." } }`
+     * when TMDB_API_KEY is configured on the backend server.
      */
-    @GET("api/tmdb/search/tv")
-    suspend fun searchTmdbTv(
-        @Query("query") query: String,
-        @Query("first_air_date_year") year: Int? = null
-    ): Response<ResponseBody>
-
-    @GET("api/tmdb/tv/{tvId}/images")
-    suspend fun getTmdbTvImages(
-        @Path("tvId") tvId: Long,
-        @Query("include_image_language") includeImageLanguage: String = "en,null,ja"
-    ): Response<ResponseBody>
-
-    @GET("api/fanart/tv/{tvId}")
-    suspend fun getFanartTvImages(
-        @Path("tvId") tvId: Long
+    @GET("api/tmdb/anime")
+    suspend fun getTmdbAnimeArtwork(
+        @Query("malId") malId: Long? = null,
+        @Query("title") title: String? = null
     ): Response<ResponseBody>
 }
 

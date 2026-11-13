@@ -161,10 +161,16 @@ object JsonParsers {
     fun parseAnimeListFromResponse(rawBody: String): List<Anime> {
         return runCatching {
             val trimmed = rawBody.trim()
+            if (trimmed.isEmpty() || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
+                return emptyList()
+            }
             val array = if (trimmed.startsWith("[")) {
                 JSONArray(trimmed)
             } else {
                 val root = JSONObject(trimmed)
+                if (root.has("ok") && !root.optBoolean("ok", true)) {
+                    return emptyList()
+                }
                 root.optJSONArray("items")
                     ?: root.optJSONArray("anime")
                     ?: root.optJSONArray("data")
@@ -183,7 +189,12 @@ object JsonParsers {
                     val obj = array.optJSONObject(i) ?: continue
                     parseHoshikaAnime(obj)?.let { add(it) }
                 }
-            }
+            }.distinctBy { it.hoshikaId }
+        }.onFailure { e ->
+            `in`.aniscroll.tv.features.search.SearchLogger.e(
+                "Response parsing error in parseAnimeListFromResponse: ${e.message}",
+                e
+            )
         }.getOrDefault(emptyList())
     }
 
@@ -341,7 +352,7 @@ object JsonParsers {
     }
 
     /**
-     * Parses AniList ID from GET https://api.aniscroll.in/api/anilist/id?malId={malId}
+     * Parses AniList ID from GET https://anivault-scraper-five.vercel.app/api/anilist/id?malId={malId}
      */
     fun parseAniListIdFromMalResponse(rawBody: String): Long? {
         return runCatching {
@@ -352,11 +363,20 @@ object JsonParsers {
         }.getOrNull()
     }
 
+    data class AniScrollSearchMatch(
+        val anilistId: Long,
+        val format: String?
+    )
+
     /**
-     * Resolves the best matching AniList ID from GET https://api.aniscroll.in/api/search?q={query}
+     * Resolves the best matching AniList ID from GET https://anivault-scraper-five.vercel.app/api/search?q={query}
      * by comparing candidate titles, format (TV/MOVIE/OVA/ONA), and episode counts against [targetAnime].
      */
     fun parseAniScrollIdSearch(rawBody: String, targetAnime: Anime): Long? {
+        return parseAniScrollSearchMatch(rawBody, targetAnime)?.anilistId
+    }
+
+    fun parseAniScrollSearchMatch(rawBody: String, targetAnime: Anime): AniScrollSearchMatch? {
         return runCatching {
             val root = JSONObject(rawBody.trim())
             val results = root.optJSONArray("results")
@@ -374,6 +394,7 @@ object JsonParsers {
             val targetEpisodes = targetAnime.totalEpisodes
 
             var bestId: Long? = null
+            var bestFormat: String? = null
             var bestScore = Int.MIN_VALUE
 
             for (i in 0 until results.length()) {
@@ -424,10 +445,11 @@ object JsonParsers {
                 if (score > bestScore) {
                     bestScore = score
                     bestId = candidateId
+                    bestFormat = candidateFormat
                 }
             }
 
-            bestId
+            bestId?.let { AniScrollSearchMatch(anilistId = it, format = bestFormat) }
         }.getOrNull()
     }
 
@@ -439,7 +461,7 @@ object JsonParsers {
 
     /**
      * Parses AniScroll streaming response from:
-     * GET https://api.aniscroll.in/api/watch/zokoanime/{anilist_id}/{episode}/{sub|dub}
+     * GET https://anivault-scraper-five.vercel.app/api/watch/zokoanime/{anilist_id}/{episode}/{sub|dub}
      */
     fun parseAniScrollStreamResponse(
         anilistId: Long,
@@ -480,7 +502,7 @@ object JsonParsers {
                 )
             }
 
-            // 2. Parse `qualities` array from api.aniscroll.in/api/watch/zokoanime
+            // 2. Parse `qualities` array from anivault-scraper-five.vercel.app/api/watch/zokoanime
             val qualitiesArr = dataObj.optJSONArray("qualities") ?: root.optJSONArray("qualities")
             if (qualitiesArr != null) {
                 for (i in 0 until qualitiesArr.length()) {

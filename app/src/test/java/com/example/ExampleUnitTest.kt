@@ -185,14 +185,14 @@ class ExampleUnitTest {
               "type": "sub",
               "embedUrl": "https://zokoanime.video/stream/mal/16498/1/sub",
               "m3u8": "https://hls.dramahot.top/p/master.m3u8",
-              "hlsProxyUrl": "https://api.aniscroll.in/api/proxy/hls?url=master.m3u8",
+              "hlsProxyUrl": "https://anivault-scraper-five.vercel.app/api/proxy/hls?url=master.m3u8",
               "qualities": [
                 {
                   "quality": "1080p",
                   "resolution": "1920x1080",
                   "width": 1920,
                   "height": 1080,
-                  "hlsProxyUrl": "https://api.aniscroll.in/api/proxy/hls?url=1080.m3u8"
+                  "hlsProxyUrl": "https://anivault-scraper-five.vercel.app/api/proxy/hls?url=1080.m3u8"
                 }
               ],
               "subtitles": [
@@ -201,7 +201,7 @@ class ExampleUnitTest {
                   "label": "English",
                   "default": true,
                   "src": "https://hls.dramahot.top/subs/en.vtt",
-                  "url": "https://api.aniscroll.in/api/proxy/subtitle?url=en.vtt"
+                  "url": "https://anivault-scraper-five.vercel.app/api/proxy/subtitle?url=en.vtt"
                 }
               ],
               "skip": {
@@ -220,5 +220,9 @@ class ExampleUnitTest {
         assertEquals(1542f, zokoStream.outroEndSec)
         assertTrue(zokoStream.sources.any { it.quality == "Auto" })
         assertTrue(zokoStream.sources.any { it.quality == "1080p" })
+        assertEquals(
+            "https://anivault-scraper-five.vercel.app/",
+            `in`.aniscroll.tv.core.network.NetworkModule.ANISCROLL_STREAMING_BASE_URL
+        )
     }
 }
