@@ -53,7 +53,11 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
 
-          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null
+          # sdkmanager exits after accepting licenses; yes may receive SIGPIPE.
+          # Temporarily disable pipefail so that expected SIGPIPE does not fail the step.
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
+          set -o pipefail
 
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install \
             "platforms;android-36.1" \
