@@ -79,7 +79,7 @@ jobs:
           # APKs from separate runs will not be update-compatible.
           KEYSTORE_PATH="$RUNNER_TEMP/aniscroll-upload-key.jks"
           STORE_PASSWORD="$(openssl rand -hex 24)"
-          KEY_PASSWORD="$(openssl rand -hex 24)"
+          KEY_PASSWORD="$STORE_PASSWORD"
 
           keytool -genkeypair -v \
             -keystore "$KEYSTORE_PATH" \
