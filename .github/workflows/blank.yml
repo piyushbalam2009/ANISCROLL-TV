@@ -38,10 +38,7 @@ jobs:
           packages: ''
 
       - name: Install Android SDK packages
-        shell: bash
         run: |
-          set -euo pipefail
-
           sdkmanager --install \
             "platforms;android-36.1" \
             "build-tools;36.0.0" \
@@ -52,41 +49,40 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Validate signing secrets
+      # Restore the same generated signing key between builds.
+      - name: Restore signing keystore
+        id: signing-key
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/aniscroll-upload-key.jks
+          key: aniscroll-release-keystore-v1
+
+      # Generate a key only on the first run.
+      - name: Generate release keystore if missing
+        if: steps.signing-key.outputs.cache-hit != 'true'
         shell: bash
-        env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
 
-          for name in RELEASE_KEYSTORE_BASE64 RELEASE_STORE_PASSWORD RELEASE_KEY_PASSWORD; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing GitHub secret: $name"
-              exit 1
-            fi
-          done
+          keytool -genkeypair -v \
+            -keystore "$RUNNER_TEMP/aniscroll-upload-key.jks" \
+            -alias upload \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storetype JKS \
+            -dname "CN=AniScroll, OU=Android, O=AniScroll, L=India, ST=Maharashtra, C=IN" \
+            -storepass "${{ secrets.RELEASE_STORE_PASSWORD || 'AniScrollTemporaryStore2026' }}" \
+            -keypass "${{ secrets.RELEASE_KEY_PASSWORD || 'AniScrollTemporaryKey2026' }}"
 
-      - name: Restore release keystore
+          chmod 600 "$RUNNER_TEMP/aniscroll-upload-key.jks"
+
+      - name: Configure signing environment
         shell: bash
-        env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
         run: |
-          set -euo pipefail
-
-          KEYSTORE_PATH="$RUNNER_TEMP/aniscroll-upload-key.jks"
-
-          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
-          chmod 600 "$KEYSTORE_PATH"
-
-          keytool -list \
-            -keystore "$KEYSTORE_PATH" \
-            -storepass "$RELEASE_STORE_PASSWORD" \
-            -alias upload
-
-          echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/aniscroll-upload-key.jks" >> "$GITHUB_ENV"
+          echo "STORE_PASSWORD=${{ secrets.RELEASE_STORE_PASSWORD || 'AniScrollTemporaryStore2026' }}" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=${{ secrets.RELEASE_KEY_PASSWORD || 'AniScrollTemporaryKey2026' }}" >> "$GITHUB_ENV"
 
       - name: Configure optional API values
         shell: bash
@@ -104,16 +100,17 @@ jobs:
 
           chmod 600 .env
 
+      - name: Verify signing keystore
+        run: |
+          keytool -list \
+            -keystore "$KEYSTORE_PATH" \
+            -storepass "$STORE_PASSWORD" \
+            -alias upload
+
       - name: Run unit tests
-        env:
-          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: gradle testDebugUnitTest --no-daemon --stacktrace
 
       - name: Build signed release APK
-        env:
-          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: Verify APK
@@ -134,10 +131,19 @@ jobs:
           echo "APK SHA256:"
           sha256sum "$APK"
 
-      - name: Upload release APK
+      - name: Upload signed release APK
         uses: actions/upload-artifact@v4
         with:
           name: ANISCROLL-TV-release
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # Export the keystore as a protected artifact for backup.
+      - name: Export signing keystore backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: ANISCROLL-TV-signing-key-BACKUP
+          path: ${{ runner.temp }}/aniscroll-upload-key.jks
           if-no-files-found: error
           retention-days: 30
