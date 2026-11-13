@@ -70,48 +70,35 @@ jobs:
           gradle-version: '9.3.1'
           cache-read-only: false
 
-      - name: Prepare signing keystore
+      - name: Generate temporary release keystore
         shell: bash
-        env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
 
+          # TEMPORARY ONLY: a new signing identity is created for every workflow run.
+          # APKs from separate runs will not be update-compatible.
           KEYSTORE_PATH="$RUNNER_TEMP/aniscroll-upload-key.jks"
+          STORE_PASSWORD="$(openssl rand -hex 24)"
+          KEY_PASSWORD="$(openssl rand -hex 24)"
 
-          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
-            printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
-            echo "Using configured GitHub release keystore."
-          elif [ -f "my-upload-key.jks" ]; then
-            cp "my-upload-key.jks" "$KEYSTORE_PATH"
-            echo "Using repository-local keystore."
-          else
-            echo "::error::No release keystore found. Configure RELEASE_KEYSTORE_BASE64."
-            exit 1
-          fi
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE_PATH" \
+            -alias upload \
+            -keyalg RSA \
+            -keysize 4096 \
+            -validity 10000 \
+            -storepass "$STORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            -dname "CN=ANISCROLL-TV, OU=Release, O=ANISCROLL, L=Unknown, ST=Unknown, C=IN"
 
           chmod 600 "$KEYSTORE_PATH"
+          {
+            echo "KEYSTORE_PATH=$KEYSTORE_PATH"
+            echo "RELEASE_STORE_PASSWORD=$STORE_PASSWORD"
+            echo "RELEASE_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
 
-          if [ ! -s "$KEYSTORE_PATH" ]; then
-            echo "::error::Keystore is empty."
-            exit 1
-          fi
-
-          if [ -z "${RELEASE_STORE_PASSWORD:-}" ] || [ -z "${RELEASE_KEY_PASSWORD:-}" ]; then
-            echo "::error::Release signing passwords are missing."
-            exit 1
-          fi
-
-          if ! keytool -list -keystore "$KEYSTORE_PATH" \
-            -storepass "$RELEASE_STORE_PASSWORD" -alias upload >/dev/null 2>&1; then
-            echo "::error::Keystore alias 'upload' could not be verified."
-            exit 1
-          fi
-
-          echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
-          echo "Release keystore verified."
+          echo "A temporary signing keystore was generated for this run only."
 
       - name: Configure optional API values
         shell: bash
@@ -130,11 +117,10 @@ jobs:
 
       - name: Build signed release APK
         shell: bash
-        env:
-          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          export STORE_PASSWORD="$RELEASE_STORE_PASSWORD"
+          export KEY_PASSWORD="$RELEASE_KEY_PASSWORD"
           gradle assembleRelease --no-daemon --stacktrace
 
       - name: Verify release APK
