@@ -209,56 +209,203 @@ object JsonParsers {
         }.getOrNull()
     }
 
-    fun parseEpisodesFromResponse(hoshikaId: Long, rawBody: String): List<Episode> {
+    data class EpisodePaginationMeta(
+        val nextAfter: Int? = null,
+        val hasNextPage: Boolean? = null,
+        val nextPage: Int? = null,
+        val currentPage: Int? = null,
+        val totalPages: Int? = null,
+        val totalEpisodes: Int? = null
+    )
+
+    data class EpisodePageResult(
+        val episodes: List<Episode>,
+        val pagination: EpisodePaginationMeta = EpisodePaginationMeta()
+    )
+
+    fun mergeDuplicateEpisode(primary: Episode, secondary: Episode): Episode {
+        val preferredId = if (!primary.id.startsWith("${primary.hoshikaId}_ep_")) {
+            primary.id
+        } else {
+            secondary.id
+        }
+        return primary.copy(
+            id = preferredId,
+            title = primary.title ?: secondary.title,
+            description = primary.description ?: secondary.description,
+            thumbnailUrl = primary.thumbnailUrl ?: secondary.thumbnailUrl,
+            durationSeconds = primary.durationSeconds ?: secondary.durationSeconds,
+            airDate = primary.airDate ?: secondary.airDate,
+            isFiller = primary.isFiller || secondary.isFiller
+        )
+    }
+
+    fun parseEpisodePageFromResponse(hoshikaId: Long, rawBody: String): EpisodePageResult {
         return runCatching {
             val trimmed = rawBody.trim()
+            if (trimmed.isEmpty()) return EpisodePageResult(emptyList())
+
+            var paginationMeta = EpisodePaginationMeta()
             val array = if (trimmed.startsWith("[")) {
                 JSONArray(trimmed)
-            } else {
+            } else if (trimmed.startsWith("{")) {
                 val root = JSONObject(trimmed)
+                if (root.has("ok") && !root.optBoolean("ok", true)) {
+                    return EpisodePageResult(emptyList())
+                }
+                val dataObj = root.optJSONObject("data")
+                val animeObj = root.optJSONObject("anime") ?: dataObj?.optJSONObject("anime")
+                val paginationObj = root.optJSONObject("pagination")
+                    ?: dataObj?.optJSONObject("pagination")
+                    ?: root.optJSONObject("pageInfo")
+                    ?: dataObj?.optJSONObject("pageInfo")
+                    ?: root.optJSONObject("meta")
+                    ?: dataObj?.optJSONObject("meta")
+
+                val metaSources = listOfNotNull(root, dataObj, paginationObj, animeObj)
+
+                fun extractPositiveInt(vararg keys: String): Int? {
+                    for (source in metaSources) {
+                        for (key in keys) {
+                            if (!source.has(key) || source.isNull(key)) continue
+                            val intVal = source.optInt(key, -1)
+                            if (intVal > 0) return intVal
+                            val strVal = source.optString(key).takeNonNull()?.toIntOrNull()
+                            if (strVal != null && strVal > 0) return strVal
+                        }
+                    }
+                    return null
+                }
+
+                fun extractExplicitBoolean(vararg keys: String): Boolean? {
+                    for (source in metaSources) {
+                        for (key in keys) {
+                            if (!source.has(key) || source.isNull(key)) continue
+                            val rawVal = source.opt(key)
+                            when (rawVal) {
+                                is Boolean -> return rawVal
+                                is String -> {
+                                    if (rawVal.equals("true", ignoreCase = true)) return true
+                                    if (rawVal.equals("false", ignoreCase = true)) return false
+                                }
+                                is Number -> return rawVal.toInt() != 0
+                            }
+                        }
+                    }
+                    return null
+                }
+
+                paginationMeta = EpisodePaginationMeta(
+                    nextAfter = extractPositiveInt(
+                        "nextAfter",
+                        "next_after",
+                        "nextCursor",
+                        "next_cursor",
+                        "after",
+                        "endCursor",
+                        "cursor"
+                    ),
+                    hasNextPage = extractExplicitBoolean(
+                        "hasNextPage",
+                        "has_next_page",
+                        "hasMore",
+                        "has_more"
+                    ),
+                    nextPage = extractPositiveInt("nextPage", "next_page"),
+                    currentPage = extractPositiveInt("currentPage", "current_page", "page"),
+                    totalPages = extractPositiveInt(
+                        "totalPages",
+                        "total_pages",
+                        "lastPage",
+                        "last_page",
+                        "last_visible_page"
+                    ),
+                    totalEpisodes = extractPositiveInt(
+                        "totalEpisodes",
+                        "total_episodes",
+                        "total",
+                        "totalCount",
+                        "total_count",
+                        "episodesCount",
+                        "episodes_count"
+                    )
+                )
+
                 root.optJSONArray("items")
                     ?: root.optJSONArray("episodes")
                     ?: root.optJSONArray("data")
                     ?: root.optJSONArray("results")
-                    ?: root.optJSONObject("data")?.optJSONArray("episodes")
-            } ?: return emptyList()
+                    ?: dataObj?.optJSONArray("items")
+                    ?: dataObj?.optJSONArray("episodes")
+                    ?: dataObj?.optJSONArray("results")
+                    ?: animeObj?.optJSONArray("episodes")
+                    ?: animeObj?.optJSONArray("items")
+            } else {
+                null
+            } ?: return EpisodePageResult(emptyList(), paginationMeta)
 
-            buildList {
-                for (i in 0 until array.length()) {
-                    val obj = array.optJSONObject(i) ?: continue
-                    val number = obj.optInt("number", -1).takeIf { it >= 0 }
-                        ?: obj.optInt("episode_number", -1).takeIf { it >= 0 }
-                        ?: obj.optInt("episodeNumber", -1).takeIf { it >= 0 }
-                        ?: (i + 1)
-                    val epId = obj.optString("id").takeNonNull()
-                        ?: "${hoshikaId}_ep_$number"
-                    val title = obj.optString("title").takeNonNull()
-                        ?: obj.optString("name").takeNonNull()
-                    val thumb = obj.optString("thumbnail").takeNonNull()
-                        ?: obj.optString("image").takeNonNull()
-                    val desc = obj.optString("synopsis").takeNonNull()
-                        ?: obj.optString("description").takeNonNull()
-                    val duration = obj.optInt("duration", 0).takeIf { it > 0 }
-                    val airDate = obj.optString("aired").takeNonNull()
-                        ?: obj.optString("air_date").takeNonNull()
-                        ?: obj.optString("airedAt").takeNonNull()
+            val byNumber = LinkedHashMap<Int, Episode>()
+            for (i in 0 until array.length()) {
+                val obj = array.optJSONObject(i) ?: continue
+                val number = extractEpisodeNumber(obj) ?: continue
+                val epId = obj.optString("id").takeNonNull()
+                    ?: obj.optString("episodeId").takeNonNull()
+                    ?: obj.optString("episode_id").takeNonNull()
+                    ?: obj.optString("sourceId").takeNonNull()
+                    ?: "${hoshikaId}_ep_$number"
+                val title = obj.optString("title").takeNonNull()
+                    ?: obj.optString("name").takeNonNull()
+                val thumb = obj.optString("thumbnail").takeNonNull()
+                    ?: obj.optString("image").takeNonNull()
+                    ?: obj.optString("thumbnailUrl").takeNonNull()
+                val desc = obj.optString("synopsis").takeNonNull()
+                    ?: obj.optString("description").takeNonNull()
+                val duration = obj.optInt("duration", 0).takeIf { it > 0 }
+                    ?: obj.optInt("durationSeconds", 0).takeIf { it > 0 }
+                val airDate = obj.optString("aired").takeNonNull()
+                    ?: obj.optString("air_date").takeNonNull()
+                    ?: obj.optString("airedAt").takeNonNull()
 
-                    add(
-                        Episode(
-                            id = epId,
-                            hoshikaId = hoshikaId,
-                            number = number,
-                            title = title,
-                            description = desc,
-                            thumbnailUrl = thumb,
-                            durationSeconds = duration,
-                            airDate = airDate,
-                            isFiller = obj.optBoolean("filler", obj.optBoolean("is_filler", false))
-                        )
-                    )
+                val parsedEpisode = Episode(
+                    id = epId,
+                    hoshikaId = hoshikaId,
+                    number = number,
+                    title = title,
+                    description = desc,
+                    thumbnailUrl = thumb,
+                    durationSeconds = duration,
+                    airDate = airDate,
+                    isFiller = obj.optBoolean("filler", obj.optBoolean("is_filler", false))
+                )
+                val existing = byNumber[number]
+                byNumber[number] = if (existing == null) {
+                    parsedEpisode
+                } else {
+                    mergeDuplicateEpisode(existing, parsedEpisode)
                 }
-            }.sortedBy { it.number }
-        }.getOrDefault(emptyList())
+            }
+
+            EpisodePageResult(
+                episodes = byNumber.values.sortedBy { it.number },
+                pagination = paginationMeta
+            )
+        }.getOrDefault(EpisodePageResult(emptyList()))
+    }
+
+    private fun extractEpisodeNumber(obj: JSONObject): Int? {
+        val numberKeys = arrayOf("number", "episode_number", "episodeNumber", "episode", "ep", "num")
+        for (key in numberKeys) {
+            if (!obj.has(key) || obj.isNull(key)) continue
+            val intVal = obj.optInt(key, -1)
+            if (intVal >= 0) return intVal
+            val strVal = obj.optString(key).takeNonNull()?.toDoubleOrNull()?.toInt()
+            if (strVal != null && strVal >= 0) return strVal
+        }
+        return null
+    }
+
+    fun parseEpisodesFromResponse(hoshikaId: Long, rawBody: String): List<Episode> {
+        return parseEpisodePageFromResponse(hoshikaId, rawBody).episodes
     }
 
     fun parseScheduleFromResponse(rawBody: String): List<ScheduleItem> {

@@ -17,6 +17,8 @@ import `in`.aniscroll.tv.domain.model.WatchProgressItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
@@ -41,7 +43,11 @@ data class HomeFeedResult(
 )
 
 sealed class ResourceResult<out T> {
-    data class Success<T>(val data: T, val isCachedFallback: Boolean = false) : ResourceResult<T>()
+    data class Success<T>(
+        val data: T,
+        val isCachedFallback: Boolean = false,
+        val hasIncompletePagination: Boolean = false
+    ) : ResourceResult<T>()
     data class Error(val userMessage: String) : ResourceResult<Nothing>()
 }
 
@@ -58,10 +64,13 @@ class AnimeRepository(
         private const val ANIME_CACHE_TTL_MS = 15 * 60 * 1000L // 15 minutes
         private const val EPISODES_CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes
         private const val WATCH_ORDER_CACHE_TTL_MS = 20 * 60 * 1000L // 20 minutes
+        private const val MAX_EPISODE_PAGES = 250 // Supports up to 25,000 episodes while preventing runaway loops
     }
 
     private val animeMemoryCache = ConcurrentHashMap<Long, TimedCacheEntry<Anime>>()
     private val episodesMemoryCache = ConcurrentHashMap<Long, TimedCacheEntry<List<Episode>>>()
+    private val episodePageCache = ConcurrentHashMap<String, TimedCacheEntry<JsonParsers.EpisodePageResult>>()
+    private val partialEpisodesCache = ConcurrentHashMap<Long, List<Episode>>()
     private val watchOrderMemoryCache = ConcurrentHashMap<Long, TimedCacheEntry<`in`.aniscroll.tv.domain.model.FranchiseWatchOrder>>()
 
     val idConverter: HoshikaIdConverter = HoshikaIdConverter(
@@ -435,55 +444,168 @@ class AnimeRepository(
     }
 
     // --- Anime Episodes ---
-    suspend fun getAnimeEpisodes(hoshikaId: Long, after: Int? = null): ResourceResult<List<Episode>> =
+    suspend fun getAnimeEpisodes(
+        hoshikaId: Long,
+        after: Int? = null,
+        forceRefresh: Boolean = false,
+        onPartialProgress: ((episodesSoFar: List<Episode>, hasMorePages: Boolean) -> Unit)? = null
+    ): ResourceResult<List<Episode>> =
         withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
-            if (after == null) {
+            val hasPartialToResume = partialEpisodesCache.containsKey(hoshikaId)
+
+            if (forceRefresh && !hasPartialToResume) {
+                episodesMemoryCache.remove(hoshikaId)
+                episodePageCache.keys.removeIf { it.startsWith("${hoshikaId}_after_") }
+            }
+
+            if (after == null && !forceRefresh) {
                 episodesMemoryCache[hoshikaId]?.takeIf { now - it.cachedAtMs < EPISODES_CACHE_TTL_MS }?.value?.let {
                     return@withContext ResourceResult.Success(it, isCachedFallback = true)
                 }
             }
 
-            val allEpisodes = mutableListOf<Episode>()
+            val episodesByNumber = LinkedHashMap<Int, Episode>()
+            val visitedCursors = mutableSetOf<Int?>()
             var currentAfter = after
             var pageCount = 0
             var anyPageSucceeded = false
+            var paginationFailedMidStream = false
 
-            while (pageCount < 4) {
-                val raw = executeHoshikaGet(
-                    directCall = { hoshikaApi.getAnimeEpisodes(shortId = hoshikaId, after = currentAfter, limit = 100) },
-                    proxyPath = "anime/$hoshikaId/episodes"
-                ) ?: break
-
-                anyPageSucceeded = true
-                val pageEpisodes = JsonParsers.parseEpisodesFromResponse(hoshikaId, raw)
-                allEpisodes.addAll(pageEpisodes)
-
-                val nextAfter = runCatching {
-                    val root = JSONObject(raw.trim())
-                    if (root.isNull("nextAfter")) null else root.optInt("nextAfter", -1).takeIf { it > 0 }
-                }.getOrNull()
-
-                if (nextAfter == null || pageEpisodes.isEmpty() || after != null) {
+            while (pageCount < MAX_EPISODE_PAGES) {
+                currentCoroutineContext().ensureActive()
+                if (!visitedCursors.add(currentAfter)) {
                     break
                 }
-                currentAfter = nextAfter
+
+                val pageCacheKey = "${hoshikaId}_after_${currentAfter ?: 0}"
+                val cachedPage = episodePageCache[pageCacheKey]
+                    ?.takeIf { System.currentTimeMillis() - it.cachedAtMs < EPISODES_CACHE_TTL_MS }
+                    ?.value
+
+                val parsedPage: JsonParsers.EpisodePageResult = if (cachedPage != null) {
+                    cachedPage
+                } else {
+                    val raw = executeHoshikaGet(
+                        directCall = {
+                            hoshikaApi.getAnimeEpisodes(
+                                shortId = hoshikaId,
+                                after = currentAfter,
+                                limit = 100
+                            )
+                        },
+                        proxyPath = "anime/$hoshikaId/episodes",
+                        page = currentAfter
+                    )
+                    if (raw == null) {
+                        if (anyPageSucceeded && episodesByNumber.isNotEmpty()) {
+                            paginationFailedMidStream = true
+                        }
+                        break
+                    }
+                    JsonParsers.parseEpisodePageFromResponse(hoshikaId, raw).also { parsed ->
+                        episodePageCache[pageCacheKey] = TimedCacheEntry(parsed, System.currentTimeMillis())
+                    }
+                }
+
+                anyPageSucceeded = true
+                var newEpisodesInPage = 0
+                for (ep in parsedPage.episodes) {
+                    val existing = episodesByNumber[ep.number]
+                    if (existing == null) {
+                        episodesByNumber[ep.number] = ep
+                        newEpisodesInPage++
+                    } else {
+                        episodesByNumber[ep.number] = JsonParsers.mergeDuplicateEpisode(existing, ep)
+                    }
+                }
+
+                if (after != null || parsedPage.episodes.isEmpty() || newEpisodesInPage == 0) {
+                    break
+                }
+
+                val meta = parsedPage.pagination
+                val maxEpInPage = parsedPage.episodes.maxOfOrNull { it.number }
+                val currentPageNum = meta.currentPage ?: (pageCount + 1)
+
+                val explicitlyDone = meta.hasNextPage == false ||
+                    (meta.totalPages != null && currentPageNum >= meta.totalPages) ||
+                    (meta.totalEpisodes != null && episodesByNumber.size >= meta.totalEpisodes &&
+                        meta.nextAfter == null && meta.hasNextPage != true &&
+                        (meta.nextPage == null || meta.nextPage <= currentPageNum))
+
+                val nextCursor: Int? = if (explicitlyDone) {
+                    null
+                } else {
+                    when {
+                        meta.nextAfter != null && meta.nextAfter !in visitedCursors -> meta.nextAfter
+                        (meta.hasNextPage == true ||
+                            (meta.nextPage != null && meta.nextPage > currentPageNum) ||
+                            (meta.totalPages != null && currentPageNum < meta.totalPages) ||
+                            (meta.totalEpisodes != null && episodesByNumber.size < meta.totalEpisodes)) &&
+                            maxEpInPage != null && maxEpInPage !in visitedCursors -> maxEpInPage
+                        meta.hasNextPage == null && meta.nextAfter == null && meta.totalPages == null &&
+                            parsedPage.episodes.size in 50..100 &&
+                            maxEpInPage != null && maxEpInPage !in visitedCursors -> maxEpInPage
+                        else -> null
+                    }
+                }
+
+                if (onPartialProgress != null && episodesByNumber.isNotEmpty()) {
+                    onPartialProgress(episodesByNumber.values.sortedBy { it.number }, nextCursor != null)
+                }
+
+                if (nextCursor == null) {
+                    break
+                }
+                currentAfter = nextCursor
                 pageCount++
             }
 
-            if (allEpisodes.isNotEmpty()) {
-                val sorted = allEpisodes.distinctBy { it.number }.sortedBy { it.number }
-                if (after == null) {
-                    episodesMemoryCache[hoshikaId] = TimedCacheEntry(sorted, System.currentTimeMillis())
+            if (episodesByNumber.isNotEmpty()) {
+                val sorted = episodesByNumber.values.sortedBy { it.number }
+                if (paginationFailedMidStream) {
+                    partialEpisodesCache[hoshikaId] = sorted
+                    return@withContext ResourceResult.Success(
+                        data = sorted,
+                        isCachedFallback = false,
+                        hasIncompletePagination = true
+                    )
+                } else {
+                    partialEpisodesCache.remove(hoshikaId)
+                    if (after == null) {
+                        episodesMemoryCache[hoshikaId] = TimedCacheEntry(sorted, System.currentTimeMillis())
+                    }
+                    return@withContext ResourceResult.Success(
+                        data = sorted,
+                        isCachedFallback = false,
+                        hasIncompletePagination = false
+                    )
                 }
-                return@withContext ResourceResult.Success(sorted)
             }
 
-            // If Hoshika returned 0 episode objects for an anime that has episodes, synthesize playable episode entries
+            // Preserve any previously fetched episodes if a subsequent retry failed completely
+            partialEpisodesCache[hoshikaId]?.takeIf { it.isNotEmpty() }?.let { preserved ->
+                return@withContext ResourceResult.Success(
+                    data = preserved,
+                    isCachedFallback = true,
+                    hasIncompletePagination = true
+                )
+            }
+            episodesMemoryCache[hoshikaId]?.value?.takeIf { it.isNotEmpty() }?.let { cachedFull ->
+                return@withContext ResourceResult.Success(
+                    data = cachedFull,
+                    isCachedFallback = true,
+                    hasIncompletePagination = false
+                )
+            }
+
+            // If Hoshika returned 0 episode objects for an anime whose metadata explicitly declares totalEpisodes > 0,
+            // generate playable episode entries for all known episodes (without any 200-episode cap).
             val cachedAnime = dao.getCachedAnime(hoshikaId)?.toDomain() ?: fetchRemoteAnimeDetails(hoshikaId)
-            if (cachedAnime != null) {
-                val count = (cachedAnime.totalEpisodes ?: 12).coerceIn(1, 200)
-                val fallbackList = (1..count).map { epNum ->
+            val knownTotalEpisodes = cachedAnime?.totalEpisodes?.takeIf { it > 0 }
+            if (cachedAnime != null && knownTotalEpisodes != null) {
+                val fallbackList = (1..knownTotalEpisodes).map { epNum ->
                     Episode(
                         id = "${hoshikaId}_ep_$epNum",
                         hoshikaId = hoshikaId,

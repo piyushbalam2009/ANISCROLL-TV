@@ -162,10 +162,12 @@ fun AniScrollTvApp(
             val top = navigationBackStack.lastOrNull()
             if (top is TvScreenRoute.MainTab) {
                 currentTab = top.destination
+                detailsViewModel.cancelActiveEpisodeRequests()
             }
         } else if (currentTab != TvDestination.HOME) {
             currentTab = TvDestination.HOME
             navigationBackStack[0] = TvScreenRoute.MainTab(TvDestination.HOME)
+            detailsViewModel.cancelActiveEpisodeRequests()
         }
     }
 

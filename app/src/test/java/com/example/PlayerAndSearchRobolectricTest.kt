@@ -6,6 +6,8 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToIndex
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import `in`.aniscroll.tv.artwork.FanartLogoProvider
@@ -1330,6 +1332,201 @@ class PlayerAndSearchRobolectricTest {
         // Saving for one anime and opening a different anime starts at top (0, 0)
         detailsViewModel.saveScrollPositionForReturn(hoshikaId = 77001L, index = 4, offset = 20)
         assertEquals(0 to 0, detailsViewModel.consumeInitialScrollPosition(99999L))
+    }
+
+    @Test
+    fun episodePaginationAndUi_removes200EpisodeLimit_supports200_201_350_1000Plus_handlesGapsDuplicatesAndPartialRetry() = runTest {
+        val requestedCursorsByAnime = mutableMapOf<Long, MutableList<Int?>>()
+        var failAnime350AtCursor200 = true
+
+        val multiAnimeHoshika = object : HoshikaApi by FakeHoshikaApi() {
+            override suspend fun getAnimeDetails(shortId: Long, locale: String): Response<ResponseBody> {
+                val totalEps = when (shortId) {
+                    10200L -> 200
+                    10201L -> 201
+                    10350L -> 350
+                    11050L -> 1050
+                    10999L -> 350 // Empty /episodes array fallback test
+                    else -> 250
+                }
+                val body = """
+                    {
+                      "ok": true,
+                      "anime": {
+                        "shortId": $shortId,
+                        "anilistId": $shortId,
+                        "titleRomaji": "Long Anime $shortId",
+                        "titleEnglish": "Long Anime $shortId",
+                        "format": "TV",
+                        "episodes": $totalEps
+                      }
+                    }
+                """.trimIndent()
+                return Response.success(body.toResponseBody("application/json".toMediaType()))
+            }
+
+            override suspend fun getAnimeEpisodes(shortId: Long, after: Int?, limit: Int, locale: String): Response<ResponseBody> {
+                requestedCursorsByAnime.getOrPut(shortId) { mutableListOf() }.add(after)
+
+                return when (shortId) {
+                    // 1. Anime with 201 episodes paginated in 50-item pages using nextAfter (5 pages total)
+                    10201L -> {
+                        val start = (after ?: 0) + 1
+                        val end = (start + 49).coerceAtMost(201)
+                        val items = if (start <= 201) {
+                            (start..end).joinToString(",") { ep ->
+                                """{"id":"src_201_$ep","number":$ep,"title":"Ep $ep"}"""
+                            }
+                        } else ""
+                        val nextAfterField = if (end < 201) "$end" else "null"
+                        Response.success(
+                            """{"ok":true,"items":[$items],"nextAfter":$nextAfterField}"""
+                                .toResponseBody("application/json".toMediaType())
+                        )
+                    }
+                    // 2. Anime with 350 episodes using hasNextPage/totalPages/totalEpisodes & simulated mid-stream failure at after=200
+                    10350L -> {
+                        if (after == 200 && failAnime350AtCursor200) {
+                            return Response.error(503, "".toResponseBody(null))
+                        }
+                        val start = (after ?: 0) + 1
+                        val end = (start + 99).coerceAtMost(350)
+                        val hasNext = end < 350
+                        val pageNum = ((after ?: 0) / 100) + 1
+                        val items = (start..end).joinToString(",") { ep ->
+                            """{"id":"src_350_$ep","number":$ep,"title":"Episode $ep"}"""
+                        }
+                        Response.success(
+                            """{"ok":true,"items":[$items],"pagination":{"hasNextPage":$hasNext,"currentPage":$pageNum,"totalPages":4,"totalEpisodes":350}}"""
+                                .toResponseBody("application/json".toMediaType())
+                        )
+                    }
+                    // 3. Anime with 1050 episodes (11 pages of 100 items)
+                    11050L -> {
+                        val start = (after ?: 0) + 1
+                        val end = (start + 99).coerceAtMost(1050)
+                        val nextAfterField = if (end < 1050) "$end" else "null"
+                        val items = (start..end).joinToString(",") { ep ->
+                            """{"id":"onepiece_$ep","number":$ep,"title":"Romance Dawn $ep"}"""
+                        }
+                        Response.success(
+                            """{"ok":true,"items":[$items],"nextAfter":$nextAfterField}"""
+                                .toResponseBody("application/json".toMediaType())
+                        )
+                    }
+                    // 4. Anime returning 250 episodes in a single response with missing episode #11 and duplicate episode #200
+                    10250L -> {
+                        val epNumbers = (1..250).filter { it != 11 }
+                        val itemsList = mutableListOf<String>()
+                        for (ep in epNumbers) {
+                            if (ep == 200) {
+                                // Duplicate entry 1 (missing title, generic id)
+                                itemsList.add("""{"number":200}""")
+                                // Duplicate entry 2 (rich metadata & custom source ID)
+                                itemsList.add("""{"id":"custom_id_200","number":200,"title":"Milestone Episode 200"}""")
+                            } else {
+                                itemsList.add("""{"id":"src_250_$ep","number":$ep,"title":"Title $ep"}""")
+                            }
+                        }
+                        Response.success(
+                            """[${itemsList.joinToString(",")}]"""
+                                .toResponseBody("application/json".toMediaType())
+                        )
+                    }
+                    // 5. Anime where /episodes returns empty array and totalEpisodes metadata is 350
+                    10999L -> {
+                        Response.success("""{"ok":true,"items":[]}""".toResponseBody("application/json".toMediaType()))
+                    }
+                    else -> Response.success("""{"ok":true,"items":[]}""".toResponseBody("application/json".toMediaType()))
+                }
+            }
+        }
+
+        val repo = createAnimeRepository(multiAnimeHoshika, FakeAniScrollApi())
+
+        // A. Verify 201 episodes across 5 pages of 50 items (previously stopped at 4 pages = 200 episodes)
+        val res201 = repo.getAnimeEpisodes(10201L)
+        assertTrue(res201 is ResourceResult.Success)
+        val eps201 = (res201 as ResourceResult.Success).data
+        assertEquals(201, eps201.size)
+        assertEquals(1, eps201.first().number)
+        assertEquals(201, eps201.last().number)
+        assertEquals("src_201_201", eps201.last().id)
+
+        // B. Verify 350 episodes with mid-stream failure at after=200 preserves first 200 episodes,
+        // and retry reuses cached pages 1 & 2 (null, 100) without re-downloading them!
+        val res350Partial = repo.getAnimeEpisodes(10350L)
+        assertTrue(res350Partial is ResourceResult.Success)
+        val partialSuccess = res350Partial as ResourceResult.Success
+        assertTrue(partialSuccess.hasIncompletePagination)
+        assertEquals(200, partialSuccess.data.size)
+        assertEquals(listOf(null, 100, 200), requestedCursorsByAnime[10350L])
+
+        // Now allow after=200 to succeed and retry
+        failAnime350AtCursor200 = false
+        requestedCursorsByAnime[10350L]?.clear()
+        val res350Full = repo.getAnimeEpisodes(10350L, forceRefresh = true)
+        assertTrue(res350Full is ResourceResult.Success)
+        val fullSuccess = res350Full as ResourceResult.Success
+        assertFalse(fullSuccess.hasIncompletePagination)
+        assertEquals(350, fullSuccess.data.size)
+        assertEquals(350, fullSuccess.data.last().number)
+        // Pages for after=null and after=100 were served from episodePageCache, so only after=200 and after=300 hit network!
+        assertEquals(listOf<Int?>(200, 300), requestedCursorsByAnime[10350L])
+
+        // C. Verify 1050 episodes (1000+ episode anime like One Piece)
+        val res1050 = repo.getAnimeEpisodes(11050L)
+        assertTrue(res1050 is ResourceResult.Success)
+        val eps1050 = (res1050 as ResourceResult.Success).data
+        assertEquals(1050, eps1050.size)
+        assertEquals(1050, eps1050.last().number)
+        assertEquals("onepiece_1050", eps1050.last().id)
+
+        // D. Verify totalEpisodes=350 fallback when /episodes returns empty array (no 200 cap)
+        val resFallback350 = repo.getAnimeEpisodes(10999L)
+        assertTrue(resFallback350 is ResourceResult.Success)
+        assertEquals(350, (resFallback350 as ResourceResult.Success).data.size)
+
+        // E. Verify single-response 250-episode list with missing Episode 11 and duplicate Episode 200,
+        // and verify UI navigation + selecting Episode 250 plays Episode 250 (not list index 248!)
+        val res250 = repo.getAnimeEpisodes(10250L)
+        assertTrue(res250 is ResourceResult.Success)
+        val eps250 = (res250 as ResourceResult.Success).data
+        assertEquals(249, eps250.size) // 250 minus missing #11; never fabricates #11
+        assertNull(eps250.find { it.number == 11 })
+        val ep200 = eps250.find { it.number == 200 }
+        assertNotNull(ep200)
+        assertEquals("custom_id_200", ep200!!.id)
+        assertEquals("Milestone Episode 200", ep200.title)
+
+        val detailsVm = `in`.aniscroll.tv.features.details.DetailsViewModel(repo)
+        var playedEpisodeNumber = -1
+
+        composeTestRule.setContent {
+            `in`.aniscroll.tv.features.episodes.EpisodesScreen(
+                hoshikaId = 10250L,
+                viewModel = detailsVm,
+                onPlayEpisode = { _, epNum, _ -> playedEpisodeNumber = epNum },
+                onBack = {}
+            )
+        }
+
+        composeTestRule.waitUntil(timeoutMillis = 5000) {
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            detailsVm.uiState.value.episodes.size == 249
+        }
+        composeTestRule.waitForIdle()
+
+        // Jump to the last range chip (EP 202 - 250) and scroll to Episode 250 (the final episode at index 248)
+        composeTestRule.onNodeWithTag("episodes_range_chip_202_250").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("episodes_range_chip_202_250").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("episodes_lazy_column").performScrollToIndex(248)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("episode_item_250").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("episode_item_250").performClick()
+        assertEquals("Selecting Episode 250 (at list index 248) must play episode 250", 250, playedEpisodeNumber)
     }
 
     private fun createAnimeRepository(

@@ -72,6 +72,7 @@ import `in`.aniscroll.tv.core.designsystem.TvContentLoadingScreen
 import `in`.aniscroll.tv.core.designsystem.TvEpisodeListSkeleton
 import `in`.aniscroll.tv.core.designsystem.TvErrorBanner
 import `in`.aniscroll.tv.core.designsystem.TvFocusableButton
+import `in`.aniscroll.tv.core.designsystem.TvSectionLoadingHeader
 import `in`.aniscroll.tv.data.local.UiPreviewFixtures
 import `in`.aniscroll.tv.data.repository.AnimeRepository
 import `in`.aniscroll.tv.data.repository.ResourceResult
@@ -91,6 +92,8 @@ data class DetailsUiState(
     val hoshikaId: Long = -1L,
     val isLoading: Boolean = true,
     val isEpisodesLoading: Boolean = false,
+    val isLoadingMoreEpisodes: Boolean = false,
+    val episodesPaginationError: String? = null,
     val anime: Anime? = null,
     val episodes: List<Episode> = emptyList(),
     val isInWatchlist: Boolean = false,
@@ -156,6 +159,7 @@ class DetailsViewModel(
             current.hoshikaId == hoshikaId &&
             current.anime != null &&
             current.errorMessage == null &&
+            current.episodesPaginationError == null &&
             !current.isLoading
         ) {
             return
@@ -188,12 +192,20 @@ class DetailsViewModel(
         loadJob = viewModelScope.launch {
             _uiState.update {
                 if (isSameAnimeRefresh) {
-                    it.copy(isLoading = false, isEpisodesLoading = it.episodes.isEmpty(), errorMessage = null)
+                    it.copy(
+                        isLoading = false,
+                        isEpisodesLoading = it.episodes.isEmpty(),
+                        isLoadingMoreEpisodes = it.episodes.isNotEmpty(),
+                        episodesPaginationError = null,
+                        errorMessage = null
+                    )
                 } else {
                     DetailsUiState(
                         hoshikaId = hoshikaId,
                         isLoading = true,
                         isEpisodesLoading = true,
+                        isLoadingMoreEpisodes = false,
+                        episodesPaginationError = null,
                         errorMessage = null
                     )
                 }
@@ -212,6 +224,7 @@ class DetailsViewModel(
                     it.copy(
                         isLoading = false,
                         isEpisodesLoading = false,
+                        isLoadingMoreEpisodes = false,
                         errorMessage = (animeResult as? ResourceResult.Error)?.userMessage
                             ?: "Anime information is unavailable."
                     )
@@ -230,23 +243,114 @@ class DetailsViewModel(
                 )
             }
 
-            val episodesResult = animeRepository.getAnimeEpisodes(hoshikaId)
-            val resolvedEpisodes = when (episodesResult) {
-                is ResourceResult.Success -> episodesResult.data
-                is ResourceResult.Error -> {
-                    if (fixtureAnime != null) UiPreviewFixtures.getPreviewEpisodes(hoshikaId)
-                    else emptyList()
-                }
-            }
+            fetchAllEpisodesForAnime(
+                hoshikaId = hoshikaId,
+                resolvedAnime = resolvedAnime,
+                fixtureAnime = fixtureAnime,
+                forceRefresh = forceRefresh
+            )
+        }
+    }
 
+    fun retryLoadMoreEpisodes(hoshikaId: Long) {
+        val current = _uiState.value
+        val anime = current.anime ?: return
+        if (current.hoshikaId != hoshikaId || current.isLoadingMoreEpisodes) return
+
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
-                    isLoading = false,
-                    isEpisodesLoading = false,
-                    anime = resolvedAnime,
-                    episodes = resolvedEpisodes,
-                    errorMessage = null
+                    isEpisodesLoading = it.episodes.isEmpty(),
+                    isLoadingMoreEpisodes = it.episodes.isNotEmpty(),
+                    episodesPaginationError = null
                 )
+            }
+            val fixtureAnime = UiPreviewFixtures.sampleAnimeList.find { it.hoshikaId == hoshikaId }
+            fetchAllEpisodesForAnime(
+                hoshikaId = hoshikaId,
+                resolvedAnime = anime,
+                fixtureAnime = fixtureAnime,
+                forceRefresh = true
+            )
+        }
+    }
+
+    fun cancelActiveEpisodeRequests() {
+        loadJob?.cancel()
+        loadJob = null
+        _uiState.update {
+            it.copy(
+                isEpisodesLoading = false,
+                isLoadingMoreEpisodes = false
+            )
+        }
+    }
+
+    private suspend fun fetchAllEpisodesForAnime(
+        hoshikaId: Long,
+        resolvedAnime: Anime,
+        fixtureAnime: Anime?,
+        forceRefresh: Boolean
+    ) {
+        val episodesResult = animeRepository.getAnimeEpisodes(
+            hoshikaId = hoshikaId,
+            forceRefresh = forceRefresh,
+            onPartialProgress = { partialList, hasMorePages ->
+                _uiState.update { state ->
+                    if (state.hoshikaId == hoshikaId) {
+                        state.copy(
+                            isLoading = false,
+                            isEpisodesLoading = false,
+                            isLoadingMoreEpisodes = hasMorePages,
+                            episodes = partialList,
+                            episodesPaginationError = null
+                        )
+                    } else {
+                        state
+                    }
+                }
+            }
+        )
+
+        when (episodesResult) {
+            is ResourceResult.Success -> {
+                val resolvedEpisodes = episodesResult.data
+                val paginationErr = if (episodesResult.hasIncompletePagination) {
+                    "Loaded ${resolvedEpisodes.size} episodes. Additional episodes could not be loaded."
+                } else {
+                    null
+                }
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        isEpisodesLoading = false,
+                        isLoadingMoreEpisodes = false,
+                        anime = resolvedAnime,
+                        episodes = resolvedEpisodes,
+                        episodesPaginationError = paginationErr,
+                        errorMessage = null
+                    )
+                }
+            }
+            is ResourceResult.Error -> {
+                val existing = _uiState.value.episodes
+                val fallbackEpisodes = when {
+                    existing.isNotEmpty() -> existing
+                    fixtureAnime != null -> UiPreviewFixtures.getPreviewEpisodes(hoshikaId)
+                    else -> emptyList()
+                }
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        isEpisodesLoading = false,
+                        isLoadingMoreEpisodes = false,
+                        anime = resolvedAnime,
+                        episodes = fallbackEpisodes,
+                        episodesPaginationError = if (existing.isNotEmpty()) episodesResult.userMessage else null,
+                        errorMessage = null
+                    )
+                }
             }
         }
     }
@@ -801,8 +905,8 @@ fun DetailsScreen(
                             }
 
                             items(
-                                items = state.episodes.take(15),
-                                key = { "detail_ep_${it.id}" }
+                                items = state.episodes,
+                                key = { "detail_ep_${it.number}_${it.id}" }
                             ) { episode ->
                                 val epProgress = state.watchProgress.find { it.episodeNumber == episode.number }
                                 Box(modifier = Modifier.padding(horizontal = 36.dp)) {
@@ -820,6 +924,30 @@ fun DetailsScreen(
                                             onPlayEpisode(anime.hoshikaId, episode.number, epProgress?.language)
                                         }
                                     )
+                                }
+                            }
+
+                            if (state.isLoadingMoreEpisodes) {
+                                item(key = "details_episodes_loading_more") {
+                                    Box(modifier = Modifier.padding(horizontal = 36.dp)) {
+                                        TvSectionLoadingHeader(
+                                            label = TvContentLoadingCopy.LOADING_EPISODES,
+                                            detailText = "Fetching more episodes (${state.episodes.size} loaded)...",
+                                            modifier = Modifier.testTag("details_loading_more_episodes")
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (state.episodesPaginationError != null) {
+                                item(key = "details_episodes_pagination_error") {
+                                    Box(modifier = Modifier.padding(horizontal = 36.dp)) {
+                                        TvErrorBanner(
+                                            message = state.episodesPaginationError!!,
+                                            onRetry = { viewModel.retryLoadMoreEpisodes(anime.hoshikaId) },
+                                            modifier = Modifier.testTag("details_episodes_pagination_error_banner")
+                                        )
+                                    }
                                 }
                             }
                         }

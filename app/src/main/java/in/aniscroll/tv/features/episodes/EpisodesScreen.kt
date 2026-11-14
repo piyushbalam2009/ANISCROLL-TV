@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -38,9 +39,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -60,13 +63,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import `in`.aniscroll.tv.core.designsystem.TvColors
+import `in`.aniscroll.tv.core.designsystem.TvContentLoadingCopy
+import `in`.aniscroll.tv.core.designsystem.TvEpisodeListSkeleton
 import `in`.aniscroll.tv.core.designsystem.TvErrorBanner
 import `in`.aniscroll.tv.core.designsystem.TvFocusableButton
-import `in`.aniscroll.tv.core.designsystem.TvLoadingIndicator
+import `in`.aniscroll.tv.core.designsystem.TvSectionLoadingHeader
 import `in`.aniscroll.tv.core.designsystem.TvSelectableChip
 import `in`.aniscroll.tv.domain.model.Episode
 import `in`.aniscroll.tv.domain.model.WatchProgressItem
 import `in`.aniscroll.tv.features.details.DetailsViewModel
+import kotlinx.coroutines.launch
 
 @Composable
 fun EpisodesScreen(
@@ -77,18 +83,24 @@ fun EpisodesScreen(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    var selectedChunkIndex by rememberSaveable { mutableIntStateOf(0) }
     var lastSelectedEpisodeNumber by rememberSaveable { mutableIntStateOf(-1) }
+    val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(hoshikaId) {
         viewModel.loadAnime(hoshikaId)
     }
 
-    val chunkSize = 25
+    val chunkSize = 50
     val episodeChunks = remember(state.episodes) {
         state.episodes.chunked(chunkSize)
     }
-    val activeEpisodes = episodeChunks.getOrNull(selectedChunkIndex) ?: state.episodes
+    val activeChunkIndex by remember(episodeChunks.size) {
+        derivedStateOf {
+            if (episodeChunks.isEmpty()) 0
+            else (listState.firstVisibleItemIndex / chunkSize).coerceIn(0, episodeChunks.lastIndex)
+        }
+    }
 
     Column(
         modifier = modifier
@@ -117,9 +129,14 @@ fun EpisodesScreen(
                         color = TvColors.PrimaryText
                     )
                     Text(
-                        text = "${state.episodes.size} Episodes Available",
+                        text = if (state.isLoadingMoreEpisodes) {
+                            "${state.episodes.size} Episodes Loaded (Fetching more...)"
+                        } else {
+                            "${state.episodes.size} Episodes Available"
+                        },
                         style = MaterialTheme.typography.bodyMedium,
-                        color = TvColors.SecondaryText
+                        color = TvColors.SecondaryText,
+                        modifier = Modifier.testTag("episodes_available_count")
                     )
                 }
             }
@@ -131,27 +148,37 @@ fun EpisodesScreen(
                     isPrimary = true,
                     onClick = {
                         onPlayEpisode(hoshikaId, lastWatched.episodeNumber, lastWatched.language)
-                    }
+                    },
+                    modifier = Modifier.testTag("episodes_resume_button")
                 )
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Range Pagination Chips for long episode lists (e.g. 1-25, 26-50)
+        // Range Jump Chips for long episode lists (jumps LazyColumn to that range while keeping all episodes in the list)
         if (episodeChunks.size > 1) {
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("episodes_range_chips_row")
             ) {
                 items(episodeChunks.size) { index ->
                     val chunk = episodeChunks[index]
                     val startEp = chunk.firstOrNull()?.number ?: 1
                     val endEp = chunk.lastOrNull()?.number ?: startEp
+                    val targetIndex = index * chunkSize
                     TvSelectableChip(
                         label = "EP $startEp - $endEp",
-                        selected = selectedChunkIndex == index,
-                        onClick = { selectedChunkIndex = index }
+                        selected = activeChunkIndex == index,
+                        onClick = {
+                            lastSelectedEpisodeNumber = startEp
+                            coroutineScope.launch {
+                                listState.scrollToItem(targetIndex.coerceIn(0, (state.episodes.size - 1).coerceAtLeast(0)))
+                            }
+                        },
+                        modifier = Modifier.testTag("episodes_range_chip_${startEp}_$endEp")
                     )
                 }
             }
@@ -160,8 +187,8 @@ fun EpisodesScreen(
 
         when {
             state.isLoading || (state.isEpisodesLoading && state.episodes.isEmpty()) -> {
-                `in`.aniscroll.tv.core.designsystem.TvEpisodeListSkeleton(
-                    title = `in`.aniscroll.tv.core.designsystem.TvContentLoadingCopy.LOADING_EPISODES,
+                TvEpisodeListSkeleton(
+                    title = TvContentLoadingCopy.LOADING_EPISODES,
                     subtitle = "Loading episodes...",
                     itemCount = 5
                 )
@@ -174,13 +201,16 @@ fun EpisodesScreen(
             }
             else -> {
                 LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("episodes_lazy_column"),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     contentPadding = PaddingValues(bottom = 32.dp)
                 ) {
                     items(
-                        items = activeEpisodes,
-                        key = { "ep_screen_${it.id}" }
+                        items = state.episodes,
+                        key = { "ep_screen_${it.number}_${it.id}" }
                     ) { episode ->
                         val progress = state.watchProgress.find { it.episodeNumber == episode.number }
                         val isPlaying = state.lastWatchedEpisode?.episodeNumber == episode.number &&
@@ -203,6 +233,26 @@ fun EpisodesScreen(
                                 onPlayEpisode(hoshikaId, episode.number, progress?.language)
                             }
                         )
+                    }
+
+                    if (state.isLoadingMoreEpisodes) {
+                        item(key = "episodes_screen_loading_more") {
+                            TvSectionLoadingHeader(
+                                label = TvContentLoadingCopy.LOADING_EPISODES,
+                                detailText = "Fetching more episodes (${state.episodes.size} loaded)...",
+                                modifier = Modifier.testTag("episodes_loading_more_indicator")
+                            )
+                        }
+                    }
+
+                    if (state.episodesPaginationError != null) {
+                        item(key = "episodes_screen_pagination_error") {
+                            TvErrorBanner(
+                                message = state.episodesPaginationError!!,
+                                onRetry = { viewModel.retryLoadMoreEpisodes(hoshikaId) },
+                                modifier = Modifier.testTag("episodes_pagination_error_banner")
+                            )
+                        }
                     }
                 }
             }
@@ -262,7 +312,8 @@ fun EpisodeListRowItem(
                 indication = null,
                 onClick = onClick
             )
-            .padding(12.dp),
+            .padding(12.dp)
+            .testTag("episode_item_${episode.number}"),
         verticalAlignment = Alignment.CenterVertically
     ) {
         // Thumbnail or Consistent Fallback Box
