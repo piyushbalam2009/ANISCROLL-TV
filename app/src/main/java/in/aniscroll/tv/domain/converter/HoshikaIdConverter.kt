@@ -29,8 +29,12 @@ class HoshikaIdConverter(
     private val fetchHoshikaAnimeDetails: suspend (Long) -> Anime?
 ) {
 
+    private val memoryTargetCache = java.util.concurrent.ConcurrentHashMap<Long, ResolvedStreamingTarget>()
+
     suspend fun convert(hoshikaId: Long): Long? {
         if (hoshikaId <= 0L) return null
+
+        memoryTargetCache[hoshikaId]?.let { return it.anilistId }
 
         val cached = dao.getMapping(hoshikaId)
         if (cached != null && cached.anilistId > 0L) {
@@ -47,13 +51,25 @@ class HoshikaIdConverter(
 
     /**
      * Resolves both the verified AniList ID and the anime format (e.g. "MOVIE", "TV", "SPECIAL", "OVA", "ONA")
-     * from existing metadata, Room cache, Hoshika details, or AniScroll's AniList search metadata.
+     * from existing metadata, in-memory cache, Room cache, Hoshika details, or AniScroll's AniList search metadata.
      */
     suspend fun resolveTarget(anime: Anime): ResolvedStreamingTarget? {
         val hoshikaId = anime.hoshikaId
         if (hoshikaId <= 0L) return null
 
-        var resolvedFormat: String? = anime.format?.trim()?.takeIf { it.isNotEmpty() }
+        val incomingFormat = anime.format?.trim()?.takeIf { it.isNotEmpty() }
+        memoryTargetCache[hoshikaId]?.let { mem ->
+            if (!mem.format.isNullOrBlank() || incomingFormat != null) {
+                val merged = if (mem.format.isNullOrBlank() && incomingFormat != null) {
+                    mem.copy(format = incomingFormat).also { memoryTargetCache[hoshikaId] = it }
+                } else {
+                    mem
+                }
+                return merged
+            }
+        }
+
+        var resolvedFormat: String? = incomingFormat
             ?: dao.getCachedAnime(hoshikaId)?.format?.trim()?.takeIf { it.isNotEmpty() }
 
         // 1. Check Room cache first
@@ -62,7 +78,9 @@ class HoshikaIdConverter(
             if (resolvedFormat == null) {
                 resolvedFormat = fetchHoshikaAnimeDetails(hoshikaId)?.format?.trim()?.takeIf { it.isNotEmpty() }
             }
-            return ResolvedStreamingTarget(anilistId = cached.anilistId, format = resolvedFormat)
+            return ResolvedStreamingTarget(anilistId = cached.anilistId, format = resolvedFormat).also {
+                memoryTargetCache[hoshikaId] = it
+            }
         }
 
         // 2. Direct anilistId from metadata if present
@@ -72,7 +90,9 @@ class HoshikaIdConverter(
             if (resolvedFormat == null) {
                 resolvedFormat = fetchHoshikaAnimeDetails(hoshikaId)?.format?.trim()?.takeIf { it.isNotEmpty() }
             }
-            return ResolvedStreamingTarget(anilistId = directAnilist, format = resolvedFormat)
+            return ResolvedStreamingTarget(anilistId = directAnilist, format = resolvedFormat).also {
+                memoryTargetCache[hoshikaId] = it
+            }
         }
 
         // 3. Ensure we have full Hoshika details (English/Romaji titles, episodes, format, malId)
@@ -92,7 +112,9 @@ class HoshikaIdConverter(
 
         detailedAnime.anilistId?.takeIf { it > 0L && it != hoshikaId }?.let { resolved ->
             saveMapping(hoshikaId, resolved)
-            return ResolvedStreamingTarget(anilistId = resolved, format = resolvedFormat)
+            return ResolvedStreamingTarget(anilistId = resolved, format = resolvedFormat).also {
+                memoryTargetCache[hoshikaId] = it
+            }
         }
 
         // 4. If Hoshika exposed malId, resolve via AniScroll backend /api/anilist/id
@@ -100,7 +122,9 @@ class HoshikaIdConverter(
             val fromMal = resolveFromMalId(malId)
             if (fromMal != null && fromMal > 0L) {
                 saveMapping(hoshikaId, fromMal)
-                return ResolvedStreamingTarget(anilistId = fromMal, format = resolvedFormat)
+                return ResolvedStreamingTarget(anilistId = fromMal, format = resolvedFormat).also {
+                    memoryTargetCache[hoshikaId] = it
+                }
             }
         }
 
@@ -118,7 +142,9 @@ class HoshikaIdConverter(
                 return ResolvedStreamingTarget(
                     anilistId = match.anilistId,
                     format = resolvedFormat ?: match.format
-                )
+                ).also {
+                    memoryTargetCache[hoshikaId] = it
+                }
             }
         }
 

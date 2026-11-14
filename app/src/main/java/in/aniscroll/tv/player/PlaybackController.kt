@@ -1,15 +1,19 @@
 package `in`.aniscroll.tv.player
 
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import `in`.aniscroll.tv.core.datastore.UserPreferencesRepository
+import `in`.aniscroll.tv.core.network.NetworkMonitor
+import `in`.aniscroll.tv.core.network.NetworkTier
 import `in`.aniscroll.tv.data.repository.AnimeRepository
 import `in`.aniscroll.tv.data.repository.PlaybackRepository
 import `in`.aniscroll.tv.data.repository.ResourceResult
 import `in`.aniscroll.tv.data.repository.StreamLoadResult
+import `in`.aniscroll.tv.data.repository.StreamingSourceResolver
 import `in`.aniscroll.tv.domain.model.Anime
 import `in`.aniscroll.tv.domain.model.AppSettings
 import `in`.aniscroll.tv.domain.model.Episode
@@ -67,7 +71,8 @@ class PlaybackController(
     val exoPlayerManager: ExoPlayerManager,
     private val animeRepository: AnimeRepository,
     private val playbackRepository: PlaybackRepository,
-    val preferencesRepository: UserPreferencesRepository
+    val preferencesRepository: UserPreferencesRepository,
+    private val networkMonitor: NetworkMonitor? = null
 ) : ViewModel() {
 
     val qualityManager = QualityManager()
@@ -86,10 +91,25 @@ class PlaybackController(
 
     private var currentStreamData: StreamData? = null
     private var sessionJob: Job? = null
+    private var episodesLoadJob: Job? = null
+    private var aniSkipJob: Job? = null
+    private var prewarmNextEpisodeJob: Job? = null
+    private var networkRecoveryJob: Job? = null
     private var audioSwitchJob: Job? = null
     private var progressPollingJob: Job? = null
     private var countdownJob: Job? = null
     private var streamRetryCount = 0
+    private var hasRefreshedStreamOnError = false
+    private var prewarmedEpisodeNumber: Int? = null
+
+    @Volatile
+    private var activeMetrics: StreamingSessionMetrics? = null
+
+    @Volatile
+    private var bufferingStartedElapsedMs: Long? = null
+
+    @Volatile
+    private var hasRenderedFirstFrameForSession: Boolean = false
 
     @Volatile
     private var sessionGeneration: Long = 0L
@@ -106,6 +126,38 @@ class PlaybackController(
             val player = exoPlayerManager.peekPlayer() ?: return
             val dur = player.duration.coerceAtLeast(0L)
             _progressState.update { it.copy(durationMs = dur) }
+
+            val nowElapsed = SystemClock.elapsedRealtime()
+            if (playbackState == Player.STATE_BUFFERING) {
+                if (bufferingStartedElapsedMs == null) {
+                    bufferingStartedElapsedMs = nowElapsed
+                }
+            } else {
+                val bufferStart = bufferingStartedElapsedMs
+                if (bufferStart != null) {
+                    bufferingStartedElapsedMs = null
+                    val stallMs = (nowElapsed - bufferStart).coerceAtLeast(0L)
+                    activeMetrics?.let { currentMetrics ->
+                        val isRebuffer = hasRenderedFirstFrameForSession
+                        val updated = StreamingDiagnostics.recordBufferingCompleted(
+                            session = currentMetrics,
+                            stallDurationMs = stallMs,
+                            isRebuffer = isRebuffer
+                        )
+                        activeMetrics = updated
+                        if (isRebuffer) {
+                            qualityManager.applyAdaptiveRebufferConstraint(
+                                player = player,
+                                selectedQualityLabel = _uiState.value.selectedQualityLabel,
+                                rebufferCount = updated.rebufferCount,
+                                networkTier = networkMonitor?.currentTier() ?: NetworkTier.STANDARD,
+                                maxHardwareHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
+                            )
+                        }
+                    }
+                }
+            }
+
             _uiState.update {
                 it.copy(isBuffering = playbackState == Player.STATE_BUFFERING)
             }
@@ -117,7 +169,6 @@ class PlaybackController(
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             if (!isSessionActive) return
             if (isPlaying && isAppInBackground) {
-                // Defensive guard: never allow audio/video playback while app is backgrounded
                 exoPlayerManager.pauseIfActive()
                 _uiState.update { it.copy(isPlaying = false) }
                 return
@@ -131,7 +182,11 @@ class PlaybackController(
         override fun onTracksChanged(tracks: Tracks) {
             if (!isSessionActive) return
             val stream = currentStreamData ?: return
-            val qualities = qualityManager.extractAvailableQualities(stream.sources, tracks)
+            val qualities = qualityManager.extractAvailableQualities(
+                sources = stream.sources,
+                tracks = tracks,
+                maxSupportedHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
+            )
             _uiState.update { it.copy(availableQualities = qualities) }
         }
 
@@ -139,9 +194,22 @@ class PlaybackController(
             if (!isSessionActive) return
             val player = exoPlayerManager.peekPlayer() ?: return
             val stream = currentStreamData
-            if (stream != null && streamRetryCount < stream.sources.size + 1) {
+            val currentPos = player.currentPosition.coerceAtLeast(0L)
+
+            StreamingDiagnostics.logEvent(
+                "player_error code=${error.errorCodeName} pos_ms=$currentPos retry_count=$streamRetryCount"
+            )
+
+            // 1. If device is temporarily offline, wait for reconnection and resume smoothly without losing position
+            val currentTier = networkMonitor?.refreshState()
+            if (currentTier == NetworkTier.OFFLINE) {
+                scheduleNetworkReconnectRecovery(currentPos)
+                return
+            }
+
+            // 2. Try fallback quality/source URLs in the current StreamData payload first
+            if (stream != null && streamRetryCount < stream.sources.size) {
                 streamRetryCount++
-                val currentPos = player.currentPosition.coerceAtLeast(0L)
                 val nextIndex = streamRetryCount.coerceAtMost(stream.sources.lastIndex)
                 val fallbackSource = stream.sources.getOrNull(nextIndex)
                 if (fallbackSource != null) {
@@ -154,24 +222,94 @@ class PlaybackController(
                     )
                     return
                 }
-                player.prepare()
-                if (!isAppInBackground) {
-                    player.play()
-                }
-            } else {
-                _uiState.update {
-                    it.copy(
-                        isBuffering = false,
-                        isPlaying = false,
-                        errorMessage = "No playable streaming source was found."
+            }
+
+            // 3. If all sources failed (e.g. expired CDN token), invalidate cache and refresh once from the same provider
+            val activeAnime = _uiState.value.anime
+            if (activeAnime != null && !hasRefreshedStreamOnError) {
+                hasRefreshedStreamOnError = true
+                streamRetryCount = 0
+                stream?.let {
+                    playbackRepository.invalidateCachedStream(
+                        anilistId = it.anilistId,
+                        episodeNumber = _uiState.value.currentEpisodeNumber,
+                        language = _uiState.value.audioLanguage
                     )
                 }
+                val generation = sessionGeneration
+                viewModelScope.launch {
+                    val prefs = appSettings.value
+                    if (!isSessionActive || generation != sessionGeneration) return@launch
+                    loadStreamForCurrentEpisode(
+                        anime = activeAnime,
+                        episodeNumber = _uiState.value.currentEpisodeNumber,
+                        language = _uiState.value.audioLanguage,
+                        overridePositionMs = currentPos,
+                        prefs = prefs,
+                        generation = generation,
+                        forceRefresh = true
+                    )
+                }
+                return
+            }
+
+            _uiState.update {
+                it.copy(
+                    isBuffering = false,
+                    isPlaying = false,
+                    errorMessage = "Playback failed or stream link expired. Press Retry to fetch a fresh stream."
+                )
             }
         }
     }
 
     init {
         exoPlayerManager.setPlayerListener(playerListener)
+        exoPlayerManager.setPerformanceCallbacks(
+            onManifestLoaded = { durationMs ->
+                activeMetrics?.let { current ->
+                    if (current.hlsManifestLoadDurationMs == null) {
+                        activeMetrics = StreamingDiagnostics.recordHlsManifestLoaded(current, durationMs)
+                    }
+                }
+            },
+            onFirstFrameRendered = {
+                hasRenderedFirstFrameForSession = true
+                activeMetrics?.let { current ->
+                    activeMetrics = StreamingDiagnostics.recordFirstFrameRendered(current)
+                }
+            },
+            onVideoFormatChanged = { width, height, bitrate ->
+                activeMetrics?.let { current ->
+                    activeMetrics = StreamingDiagnostics.recordVideoFormat(current, width, height, bitrate)
+                }
+            }
+        )
+    }
+
+    private fun scheduleNetworkReconnectRecovery(resumePositionMs: Long) {
+        val monitor = networkMonitor ?: return
+        networkRecoveryJob?.cancel()
+        _uiState.update {
+            it.copy(
+                isBuffering = true,
+                transientToastMessage = "Waiting for network connection..."
+            )
+        }
+        val generation = sessionGeneration
+        networkRecoveryJob = viewModelScope.launch {
+            monitor.isConnected.first { it }
+            if (!isSessionActive || generation != sessionGeneration) return@launch
+            val player = exoPlayerManager.peekPlayer() ?: return@launch
+            StreamingDiagnostics.logEvent("network_reconnected resuming_pos_ms=$resumePositionMs")
+            _uiState.update { it.copy(transientToastMessage = "Connection restored") }
+            player.seekTo(resumePositionMs)
+            player.prepare()
+            if (!isAppInBackground) {
+                player.playWhenReady = true
+                player.play()
+            }
+        }
     }
 
     fun startPlaybackSession(
@@ -179,7 +317,17 @@ class PlaybackController(
         episodeNumber: Int,
         requestedLanguage: String? = null
     ) {
+        val previousState = _uiState.value
+        val isEpisodeSwitch = isSessionActive &&
+            previousState.anime?.hoshikaId == hoshikaId &&
+            previousState.currentEpisodeNumber != episodeNumber
+
+        // Cancel all obsolete jobs from the previous episode/session immediately
         sessionJob?.cancel()
+        episodesLoadJob?.cancel()
+        aniSkipJob?.cancel()
+        prewarmNextEpisodeJob?.cancel()
+        networkRecoveryJob?.cancel()
         audioSwitchJob?.cancel()
         progressPollingJob?.cancel()
         countdownJob?.cancel()
@@ -188,9 +336,20 @@ class PlaybackController(
         isSessionActive = true
         isAppInBackground = false
         streamRetryCount = 0
+        hasRefreshedStreamOnError = false
+        prewarmedEpisodeNumber = null
         currentStreamData = null
+        bufferingStartedElapsedMs = SystemClock.elapsedRealtime()
+        hasRenderedFirstFrameForSession = false
 
-        // Ensure listener is attached before player creation
+        val currentTier = networkMonitor?.refreshState() ?: NetworkTier.STANDARD
+        activeMetrics = StreamingDiagnostics.startSession(
+            episodeNumber = episodeNumber.coerceAtLeast(1),
+            isEpisodeSwitch = isEpisodeSwitch,
+            networkTier = currentTier.name
+        )
+
+        // Reuse the existing ExoPlayer instance without rebuilding it
         exoPlayerManager.setPlayerListener(playerListener)
         exoPlayerManager.stopAndClear()
 
@@ -199,6 +358,13 @@ class PlaybackController(
             if (!isSessionActive || generation != sessionGeneration) return@launch
 
             val language = (requestedLanguage ?: prefs.preferredAudioLanguage).lowercase()
+            val requestedEp = episodeNumber.coerceAtLeast(1)
+
+            // Fast-path: if we are switching episodes for the already-loaded anime, reuse metadata & episodes in 0ms
+            val existingAnime = previousState.anime?.takeIf {
+                it.hoshikaId == hoshikaId && !it.format.isNullOrBlank()
+            }
+            val existingEpisodes = if (existingAnime != null) previousState.episodes else emptyList()
 
             _progressState.value = PlaybackProgressState()
             _uiState.update {
@@ -207,7 +373,7 @@ class PlaybackController(
                     isBuffering = false,
                     isPlaying = false,
                     errorMessage = null,
-                    currentEpisodeNumber = episodeNumber,
+                    currentEpisodeNumber = requestedEp,
                     audioLanguage = language,
                     subtitlesEnabled = prefs.subtitlePreferences.enabled,
                     selectedSubtitleLanguage = prefs.subtitlePreferences.preferredLanguage,
@@ -217,46 +383,89 @@ class PlaybackController(
                 )
             }
 
-            // 1. Load anime metadata & episode list from Hoshika
-            val animeRes = animeRepository.getAnimeDetails(hoshikaId)
+            // 1. Obtain anime metadata using the fast playback path (never blocks on TMDB/Fanart logo enrichment)
+            val anime = if (existingAnime != null) {
+                existingAnime
+            } else {
+                when (val animeRes = animeRepository.getAnimeForPlayback(hoshikaId)) {
+                    is ResourceResult.Success -> animeRes.data
+                    is ResourceResult.Error -> {
+                        if (!isSessionActive || generation != sessionGeneration) return@launch
+                        _uiState.update {
+                            it.copy(isLoading = false, errorMessage = animeRes.userMessage)
+                        }
+                        return@launch
+                    }
+                }
+            }
             if (!isSessionActive || generation != sessionGeneration) return@launch
 
-            val anime = when (animeRes) {
-                is ResourceResult.Success -> animeRes.data
-                is ResourceResult.Error -> {
+            val isMovie = StreamingSourceResolver.isMovie(anime.format)
+            val effectiveEpisodeNumber = StreamingSourceResolver.resolveEpisodeNumber(
+                format = anime.format,
+                requestedEpisode = requestedEp
+            )
+
+            if (isMovie) {
+                _uiState.update {
+                    it.copy(
+                        anime = anime,
+                        episodes = emptyList(),
+                        currentEpisodeNumber = effectiveEpisodeNumber,
+                        currentEpisodeTitle = null,
+                        previousEpisode = null,
+                        nextEpisode = null
+                    )
+                }
+            } else if (existingEpisodes.isNotEmpty()) {
+                val currentEpObj = existingEpisodes.find { it.number == effectiveEpisodeNumber }
+                val prevEp = nextEpisodeManager.findPreviousEpisode(existingEpisodes, effectiveEpisodeNumber)
+                val nextEp = nextEpisodeManager.findNextEpisode(existingEpisodes, effectiveEpisodeNumber)
+                _uiState.update {
+                    it.copy(
+                        anime = anime,
+                        episodes = existingEpisodes,
+                        currentEpisodeNumber = effectiveEpisodeNumber,
+                        currentEpisodeTitle = currentEpObj?.title,
+                        previousEpisode = prevEp,
+                        nextEpisode = nextEp
+                    )
+                }
+            } else {
+                _uiState.update {
+                    it.copy(
+                        anime = anime,
+                        currentEpisodeNumber = effectiveEpisodeNumber
+                    )
+                }
+                // Fetch episode list concurrently in the background so it NEVER delays stream resolution
+                episodesLoadJob = viewModelScope.launch {
+                    val episodesRes = animeRepository.getAnimeEpisodes(hoshikaId)
+                    if (!isSessionActive || generation != sessionGeneration) return@launch
+                    val loadedEpisodes = (episodesRes as? ResourceResult.Success)?.data ?: emptyList()
+                    val currentEpObj = loadedEpisodes.find { it.number == effectiveEpisodeNumber }
+                    val prevEp = nextEpisodeManager.findPreviousEpisode(loadedEpisodes, effectiveEpisodeNumber)
+                    val nextEp = nextEpisodeManager.findNextEpisode(loadedEpisodes, effectiveEpisodeNumber)
                     _uiState.update {
-                        it.copy(isLoading = false, errorMessage = animeRes.userMessage)
+                        it.copy(
+                            episodes = loadedEpisodes,
+                            currentEpisodeTitle = currentEpObj?.title,
+                            previousEpisode = prevEp,
+                            nextEpisode = nextEp
+                        )
                     }
-                    return@launch
                 }
             }
 
-            val episodesRes = animeRepository.getAnimeEpisodes(hoshikaId)
-            if (!isSessionActive || generation != sessionGeneration) return@launch
-
-            val episodes = (episodesRes as? ResourceResult.Success)?.data ?: emptyList()
-            val currentEpObj = episodes.find { it.number == episodeNumber }
-            val prevEp = nextEpisodeManager.findPreviousEpisode(episodes, episodeNumber)
-            val nextEp = nextEpisodeManager.findNextEpisode(episodes, episodeNumber)
-
-            _uiState.update {
-                it.copy(
-                    anime = anime,
-                    episodes = episodes,
-                    currentEpisodeTitle = currentEpObj?.title,
-                    previousEpisode = prevEp,
-                    nextEpisode = nextEp
-                )
-            }
-
-            // 2. Resolve AniScroll HLS stream + AniSkip v2 intervals
+            // 2. Immediately resolve the stream URL and start ExoPlayer preparation
             loadStreamForCurrentEpisode(
                 anime = anime,
-                episodeNumber = episodeNumber,
+                episodeNumber = effectiveEpisodeNumber,
                 language = language,
                 overridePositionMs = null,
                 prefs = prefs,
-                generation = generation
+                generation = generation,
+                forceRefresh = false
             )
         }
     }
@@ -267,9 +476,10 @@ class PlaybackController(
         language: String,
         overridePositionMs: Long?,
         prefs: AppSettings,
-        generation: Long
+        generation: Long,
+        forceRefresh: Boolean = false
     ) {
-        when (val result = playbackRepository.resolveEpisodeStream(anime, episodeNumber, language)) {
+        when (val result = playbackRepository.resolveEpisodeStream(anime, episodeNumber, language, forceRefresh)) {
             is StreamLoadResult.Error -> {
                 if (!isSessionActive || generation != sessionGeneration) return
                 _uiState.update {
@@ -288,6 +498,20 @@ class PlaybackController(
                 currentStreamData = streamData
                 aniSkipManager.setIntervals(result.skipIntervals)
 
+                activeMetrics?.let { current ->
+                    val afterRes = StreamingDiagnostics.recordServerResolution(
+                        session = current,
+                        anilistId = streamData.anilistId,
+                        provider = result.provider.sourceId,
+                        durationMs = result.serverResolutionDurationMs
+                    )
+                    activeMetrics = StreamingDiagnostics.recordApiAndPlayableUrl(
+                        session = afterRes,
+                        apiDurationMs = result.apiRequestDurationMs,
+                        cacheHit = result.fromShortLivedCache
+                    )
+                }
+
                 val preferredQuality = prefs.defaultQuality
                 val chosenSource = streamData.sources.find {
                     it.quality.equals(preferredQuality, ignoreCase = true)
@@ -296,7 +520,11 @@ class PlaybackController(
                 val startPos = overridePositionMs
                     ?: if (prefs.resumePlayback) result.savedPositionMs else 0L
 
-                val qualities = qualityManager.extractAvailableQualities(streamData.sources, null)
+                val qualities = qualityManager.extractAvailableQualities(
+                    sources = streamData.sources,
+                    tracks = null,
+                    maxSupportedHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
+                )
                 val speed = _uiState.value.playbackSpeed
 
                 _progressState.update { it.copy(currentPositionMs = startPos) }
@@ -311,7 +539,7 @@ class PlaybackController(
                     )
                 }
 
-                // Do NOT auto-play if app moved to background while network request was resolving
+                // Start ExoPlayer preparation immediately after receiving the playable URL
                 val shouldAutoPlay = !isAppInBackground && isSessionActive && generation == sessionGeneration
                 exoPlayerManager.loadStream(
                     streamData = streamData,
@@ -323,12 +551,35 @@ class PlaybackController(
 
                 val player = exoPlayerManager.peekPlayer()
                 if (player != null) {
+                    val currentTier = networkMonitor?.currentTier() ?: NetworkTier.STANDARD
+                    val initialOption = qualities.find {
+                        it.label.equals(chosenSource.quality, ignoreCase = true)
+                    } ?: AvailableQualityOption("Auto", null)
+                    qualityManager.applyQualitySelection(
+                        player = player,
+                        option = initialOption,
+                        networkTier = currentTier,
+                        maxHardwareHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
+                    )
+
                     subtitleManager.applyTrackSelection(
                         player = player,
                         enabled = prefs.subtitlePreferences.enabled,
                         preferredLanguage = prefs.subtitlePreferences.preferredLanguage,
                         availableSubtitles = streamData.subtitles
                     )
+                }
+
+                // Fetch external AniSkip v2 intervals asynchronously in the background without delaying video start
+                aniSkipJob?.cancel()
+                aniSkipJob = viewModelScope.launch {
+                    val enrichedIntervals = playbackRepository.fetchAniSkipIntervals(
+                        anilistId = streamData.anilistId,
+                        episodeNumber = episodeNumber,
+                        streamData = streamData
+                    )
+                    if (!isSessionActive || generation != sessionGeneration) return@launch
+                    aniSkipManager.setIntervals(enrichedIntervals)
                 }
 
                 startProgressPolling(generation)
@@ -410,7 +661,13 @@ class PlaybackController(
                 playbackSpeed = _uiState.value.playbackSpeed
             )
         } else {
-            qualityManager.applyQualitySelection(player, option)
+            val currentTier = networkMonitor?.currentTier() ?: NetworkTier.STANDARD
+            qualityManager.applyQualitySelection(
+                player = player,
+                option = option,
+                networkTier = currentTier,
+                maxHardwareHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
+            )
         }
     }
 
@@ -512,6 +769,30 @@ class PlaybackController(
         _uiState.update { it.copy(transientToastMessage = null) }
     }
 
+    private fun maybePrewarmNextEpisode(posMs: Long, durMs: Long, generation: Long) {
+        if (durMs <= 0L) return
+        val remainingMs = durMs - posMs
+        if (remainingMs !in 1L..75_000L) return
+
+        val state = _uiState.value
+        val anime = state.anime ?: return
+        val nextEp = state.nextEpisode ?: return
+        if (prewarmedEpisodeNumber == nextEp.number) return
+
+        prewarmedEpisodeNumber = nextEp.number
+        prewarmNextEpisodeJob?.cancel()
+        prewarmNextEpisodeJob = viewModelScope.launch {
+            if (!isSessionActive || generation != sessionGeneration) return@launch
+            StreamingDiagnostics.logEvent("prewarm_next_episode ep=${nextEp.number}")
+            playbackRepository.resolveEpisodeStream(
+                anime = anime,
+                episodeNumber = nextEp.number,
+                language = state.audioLanguage,
+                forceRefresh = false
+            )
+        }
+    }
+
     private fun startProgressPolling(generation: Long) {
         progressPollingJob?.cancel()
         progressPollingJob = viewModelScope.launch {
@@ -551,6 +832,8 @@ class PlaybackController(
                             _uiState.update { it.copy(activeSkipPrompt = skipPrompt) }
                         }
                     }
+
+                    maybePrewarmNextEpisode(pos, dur, generation)
 
                     ticks++
                     if (ticks % 10 == 0 && player.isPlaying) {
@@ -638,6 +921,14 @@ class PlaybackController(
         sessionGeneration++
         sessionJob?.cancel()
         sessionJob = null
+        episodesLoadJob?.cancel()
+        episodesLoadJob = null
+        aniSkipJob?.cancel()
+        aniSkipJob = null
+        prewarmNextEpisodeJob?.cancel()
+        prewarmNextEpisodeJob = null
+        networkRecoveryJob?.cancel()
+        networkRecoveryJob = null
         audioSwitchJob?.cancel()
         audioSwitchJob = null
         progressPollingJob?.cancel()
@@ -647,6 +938,7 @@ class PlaybackController(
 
         persistCurrentProgress()
         currentStreamData = null
+        bufferingStartedElapsedMs = null
         exoPlayerManager.releasePlayer()
 
         _progressState.value = PlaybackProgressState()

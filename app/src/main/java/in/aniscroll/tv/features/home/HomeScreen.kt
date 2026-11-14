@@ -58,15 +58,20 @@ import coil.request.CachePolicy
 import coil.request.ImageRequest
 import `in`.aniscroll.tv.artwork.AnimeLogo
 import `in`.aniscroll.tv.core.designsystem.TvAnimePosterCard
+import `in`.aniscroll.tv.core.designsystem.TvAnimeRowSkeleton
 import `in`.aniscroll.tv.core.designsystem.TvColors
+import `in`.aniscroll.tv.core.designsystem.TvContentLoadingCopy
+import `in`.aniscroll.tv.core.designsystem.TvEmptyStateBanner
 import `in`.aniscroll.tv.core.designsystem.TvErrorBanner
 import `in`.aniscroll.tv.core.designsystem.TvFocusableButton
-import `in`.aniscroll.tv.core.designsystem.TvLoadingIndicator
+import `in`.aniscroll.tv.core.designsystem.TvHomeLoadingSkeleton
+import `in`.aniscroll.tv.core.designsystem.TvSectionLoadingHeader
 import `in`.aniscroll.tv.data.local.UiPreviewFixtures
 import `in`.aniscroll.tv.data.repository.AnimeRepository
 import `in`.aniscroll.tv.data.repository.HomeSectionRow
 import `in`.aniscroll.tv.domain.model.Anime
 import `in`.aniscroll.tv.domain.model.WatchProgressItem
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -77,6 +82,7 @@ import kotlinx.coroutines.launch
 
 data class HomeUiState(
     val isLoading: Boolean = true,
+    val isRefreshing: Boolean = false,
     val featuredAnime: Anime? = null,
     val sections: List<HomeSectionRow> = emptyList(),
     val isFromOfflineCache: Boolean = false,
@@ -100,19 +106,33 @@ class HomeViewModel(
     val watchlist: StateFlow<List<Anime>> = animeRepository.watchlistFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    private var loadHomeJob: Job? = null
+
     init {
         loadHome()
     }
 
-    fun loadHome() {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, errorMessage = null, isUsingDevFixtures = false) }
+    fun loadHome(forceRefresh: Boolean = false) {
+        if (!forceRefresh && loadHomeJob?.isActive == true) return
+        loadHomeJob?.cancel()
+        loadHomeJob = viewModelScope.launch {
+            val current = _uiState.value
+            val hasExistingContent = current.featuredAnime != null || current.sections.isNotEmpty()
+            _uiState.update {
+                it.copy(
+                    isLoading = !hasExistingContent,
+                    isRefreshing = hasExistingContent,
+                    errorMessage = null,
+                    isUsingDevFixtures = false
+                )
+            }
             val result = animeRepository.getHomeFeed()
             _uiState.update {
                 it.copy(
                     isLoading = false,
-                    featuredAnime = result.featuredAnime,
-                    sections = result.sections,
+                    isRefreshing = false,
+                    featuredAnime = result.featuredAnime ?: it.featuredAnime,
+                    sections = if (result.sections.isNotEmpty()) result.sections else it.sections,
                     isFromOfflineCache = result.isFromOfflineCache,
                     errorMessage = result.errorMessage
                 )
@@ -121,12 +141,14 @@ class HomeViewModel(
     }
 
     fun loadDevPreviewFixtures() {
+        loadHomeJob?.cancel()
         viewModelScope.launch {
             val sample = UiPreviewFixtures.sampleAnimeList
             val first = sample.firstOrNull()?.let { animeRepository.enrichAnimeWithLogo(it) }
             _uiState.update {
                 it.copy(
                     isLoading = false,
+                    isRefreshing = false,
                     featuredAnime = first,
                     sections = UiPreviewFixtures.getPreviewHomeSections(),
                     isUsingDevFixtures = true,
@@ -218,16 +240,17 @@ fun HomeScreen(
         val logoMaxHeight = (heroHeight * 0.24f).coerceIn(48.dp, 74.dp)
 
         val hasContinueWatchingRow = continueWatching.isNotEmpty()
+        val hasRemoteHomeContent = state.featuredAnime != null || state.sections.any { it.items.isNotEmpty() }
         val hasAnyContentRow = hasContinueWatchingRow || state.sections.any { it.items.isNotEmpty() }
 
         when {
-            state.isLoading -> {
-                TvLoadingIndicator(
-                    message = "Loading Hoshika anime catalogue...",
-                    modifier = Modifier.align(Alignment.Center)
+            state.isLoading && !hasRemoteHomeContent && !hasContinueWatchingRow -> {
+                TvHomeLoadingSkeleton(
+                    heroHeight = heroHeight,
+                    statusMessage = "Loading Hoshika anime catalogue..."
                 )
             }
-            state.errorMessage != null && state.featuredAnime == null && state.sections.isEmpty() -> {
+            state.errorMessage != null && !hasRemoteHomeContent -> {
                 Column(
                     modifier = Modifier
                         .align(Alignment.Center)
@@ -237,7 +260,7 @@ fun HomeScreen(
                 ) {
                     TvErrorBanner(
                         message = state.errorMessage!!,
-                        onRetry = { viewModel.loadHome() }
+                        onRetry = { viewModel.loadHome(forceRefresh = true) }
                     )
                     if (continueWatching.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(16.dp))
@@ -255,6 +278,19 @@ fun HomeScreen(
                     )
                 }
             }
+            !state.isLoading && !hasRemoteHomeContent && !hasContinueWatchingRow -> {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    TvEmptyStateBanner(
+                        title = "No anime sections available",
+                        subtitle = "Unable to retrieve trending or popular anime right now.",
+                        actionLabel = "Retry",
+                        onAction = { viewModel.loadHome(forceRefresh = true) }
+                    )
+                }
+            }
             else -> {
                 LazyColumn(
                     state = listState,
@@ -264,6 +300,21 @@ fun HomeScreen(
                     contentPadding = PaddingValues(bottom = 48.dp),
                     verticalArrangement = Arrangement.spacedBy(24.dp)
                 ) {
+                    if (state.isRefreshing) {
+                        item(key = "home_refresh_banner") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 32.dp, vertical = 8.dp)
+                            ) {
+                                TvSectionLoadingHeader(
+                                    label = TvContentLoadingCopy.LOADING_ANIME,
+                                    detailText = "Refreshing anime sections..."
+                                )
+                            }
+                        }
+                    }
+
                     // Status banner if offline cache or dev fixture mode is active
                     if (state.isFromOfflineCache || state.isUsingDevFixtures) {
                         item(key = "home_status_banner") {
@@ -289,7 +340,7 @@ fun HomeScreen(
                                 )
                                 TvFocusableButton(
                                     text = "Reconnect Live API",
-                                    onClick = { viewModel.loadHome() },
+                                    onClick = { viewModel.loadHome(forceRefresh = true) },
                                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                                 )
                             }
@@ -339,31 +390,40 @@ fun HomeScreen(
                         }
                     }
 
-                    // 3. Hoshika Content Rows
-                    itemsIndexed(
-                        items = state.sections,
-                        key = { index, section -> "section_${index}_${section.title}" }
-                    ) { rowIndex, section ->
-                        val isFirstContentRowBelowHero = !hasContinueWatchingRow && rowIndex == 0
-                        HomeAnimeContentRow(
-                            title = section.title,
-                            items = section.items,
-                            firstCardFocusRequester = if (isFirstContentRowBelowHero) firstRowFirstCardFocusRequester else null,
-                            upFocusRequester = if (isFirstContentRowBelowHero && state.featuredAnime != null) heroPlayFocusRequester else null,
-                            restoredFocusId = if (state.shouldRestoreCardFocus && state.lastFocusedRowIndex == rowIndex) {
-                                state.lastFocusedItemId
-                            } else {
-                                -1L
-                            },
-                            onConsumeRestoreFocus = { viewModel.consumeCardFocusRestore() },
-                            onAnimeClick = { anime ->
-                                viewModel.markCardClickedForReturnFocus(rowIndex, anime.hoshikaId)
-                                onOpenAnimeDetails(anime.hoshikaId)
-                            },
-                            onAnimeFocused = { anime ->
-                                viewModel.recordFocusedCard(rowIndex, anime.hoshikaId)
-                            }
-                        )
+                    // 3. Hoshika Content Rows (or section-level skeleton while remote rows load)
+                    if (state.isLoading && state.sections.isEmpty()) {
+                        item(key = "home_remote_rows_skeleton") {
+                            TvAnimeRowSkeleton(
+                                sectionLabel = TvContentLoadingCopy.LOADING_ANIME,
+                                cardsCount = 6
+                            )
+                        }
+                    } else {
+                        itemsIndexed(
+                            items = state.sections,
+                            key = { index, section -> "section_${index}_${section.title}" }
+                        ) { rowIndex, section ->
+                            val isFirstContentRowBelowHero = !hasContinueWatchingRow && rowIndex == 0
+                            HomeAnimeContentRow(
+                                title = section.title,
+                                items = section.items,
+                                firstCardFocusRequester = if (isFirstContentRowBelowHero) firstRowFirstCardFocusRequester else null,
+                                upFocusRequester = if (isFirstContentRowBelowHero && state.featuredAnime != null) heroPlayFocusRequester else null,
+                                restoredFocusId = if (state.shouldRestoreCardFocus && state.lastFocusedRowIndex == rowIndex) {
+                                    state.lastFocusedItemId
+                                } else {
+                                    -1L
+                                },
+                                onConsumeRestoreFocus = { viewModel.consumeCardFocusRestore() },
+                                onAnimeClick = { anime ->
+                                    viewModel.markCardClickedForReturnFocus(rowIndex, anime.hoshikaId)
+                                    onOpenAnimeDetails(anime.hoshikaId)
+                                },
+                                onAnimeFocused = { anime ->
+                                    viewModel.recordFocusedCard(rowIndex, anime.hoshikaId)
+                                }
+                            )
+                        }
                     }
                 }
 

@@ -460,8 +460,15 @@ object JsonParsers {
     }
 
     /**
-     * Parses AniScroll streaming response from:
-     * GET https://anivault-scraper-five.vercel.app/api/watch/zokoanime/{anilist_id}/{episode}/{sub|dub}
+     * Parses AniScroll streaming response from both:
+     * - MegaPlay (series): GET https://anivault-scraper-five.vercel.app/api/watch/megaplay/{anilist_id}/{episode}/{sub|dub}
+     * - ZokoAnime (movies): GET https://anivault-scraper-five.vercel.app/api/watch/zokoanime/{anilist_id}/{episode}/{sub|dub}
+     *
+     * Rules enforced:
+     * 1. Uses `hlsProxyUrl` as the primary "Auto" HLS source when valid and available.
+     * 2. Falls back to direct `m3u8` / `mp4ProxyUrl` / `sources` when `hlsProxyUrl` is absent or as fallback sources.
+     * 3. Never attempts to play `embedUrl`, `downloadUrl`, or an `iframeOnly` webpage as an HLS/MP4 stream.
+     * 4. Filters out preview/thumbnail sprite VTT tracks (`thumbnails.vtt` / `sprites.vtt`).
      */
     fun parseAniScrollStreamResponse(
         anilistId: Long,
@@ -470,29 +477,67 @@ object JsonParsers {
         rawBody: String
     ): StreamData? {
         return runCatching {
-            val root = JSONObject(rawBody.trim())
+            val trimmed = rawBody.trim()
+            if (!trimmed.startsWith("{")) return null
+
+            val root = JSONObject(trimmed)
+            if (root.has("ok") && !root.optBoolean("ok", true)) return null
+            if (root.optString("error").takeNonNull() != null &&
+                root.optString("m3u8").takeNonNull() == null &&
+                root.optString("hlsProxyUrl").takeNonNull() == null
+            ) {
+                return null
+            }
+
             val dataObj = root.optJSONObject("data") ?: root
+            val iframeOnly = dataObj.optBoolean("iframeOnly", root.optBoolean("iframeOnly", false))
+            val playbackMode = (dataObj.optString("playbackMode").takeNonNull()
+                ?: root.optString("playbackMode").takeNonNull()
+                ?: "hls").lowercase(Locale.ROOT)
+
+            val embedUrl = dataObj.optString("embedUrl").takeNonNull()
+                ?: root.optString("embedUrl").takeNonNull()
+            val downloadUrl = dataObj.optString("downloadUrl").takeNonNull()
+                ?: root.optString("downloadUrl").takeNonNull()
+
+            fun String?.takeValidStreamUrl(): String? {
+                val candidate = this.takeNonNull() ?: return null
+                if (!candidate.startsWith("https://", ignoreCase = true) &&
+                    !candidate.startsWith("http://", ignoreCase = true)
+                ) {
+                    return null
+                }
+                val normalizedCandidate = candidate.trimEnd('/')
+                if (embedUrl != null && normalizedCandidate.equals(embedUrl.trimEnd('/'), ignoreCase = true)) {
+                    return null
+                }
+                if (downloadUrl != null && normalizedCandidate.equals(downloadUrl.trimEnd('/'), ignoreCase = true)) {
+                    return null
+                }
+                if (candidate.contains("/stream/mal/", ignoreCase = true) &&
+                    !candidate.contains("/api/proxy/hls", ignoreCase = true) &&
+                    !candidate.contains(".m3u8", ignoreCase = true)
+                ) {
+                    return null
+                }
+                return candidate
+            }
 
             val sources = mutableListOf<StreamQualitySource>()
 
-            // 1. Primary HLS master playlist (m3u8 or hlsProxyUrl or streamUrl)
-            val masterM3u8 = dataObj.optString("m3u8").takeNonNull()
-                ?: dataObj.optString("hls").takeNonNull()
-                ?: dataObj.optString("streamUrl").takeNonNull()
-                ?: dataObj.optString("url").takeNonNull()
-            val hlsProxyUrl = dataObj.optString("hlsProxyUrl").takeNonNull()
-            val mp4ProxyUrl = dataObj.optString("mp4ProxyUrl").takeNonNull()
-                ?: dataObj.optString("mp4").takeNonNull()
+            val hlsProxyUrl = (dataObj.optString("hlsProxyUrl").takeValidStreamUrl()
+                ?: root.optString("hlsProxyUrl").takeValidStreamUrl())
+            val masterM3u8 = (dataObj.optString("m3u8").takeValidStreamUrl()
+                ?: dataObj.optString("hls").takeValidStreamUrl()
+                ?: dataObj.optString("streamUrl").takeValidStreamUrl()
+                ?: dataObj.optString("url").takeValidStreamUrl()
+                ?: root.optString("m3u8").takeValidStreamUrl())
+            val mp4ProxyUrl = (dataObj.optString("mp4ProxyUrl").takeValidStreamUrl()
+                ?: dataObj.optString("mp4").takeValidStreamUrl()
+                ?: root.optString("mp4ProxyUrl").takeValidStreamUrl())
 
-            if (masterM3u8 != null) {
-                sources.add(
-                    StreamQualitySource(
-                        url = masterM3u8,
-                        quality = "Auto",
-                        isM3u8 = true
-                    )
-                )
-            } else if (hlsProxyUrl != null) {
+            // 1. Prefer hlsProxyUrl when valid and available
+            if (hlsProxyUrl != null) {
                 sources.add(
                     StreamQualitySource(
                         url = hlsProxyUrl,
@@ -502,42 +547,57 @@ object JsonParsers {
                 )
             }
 
-            // 2. Parse `qualities` array from anivault-scraper-five.vercel.app/api/watch/zokoanime
+            // 2. Include direct masterM3u8 as primary "Auto" (if no proxy) or secondary fallback ("Direct HLS")
+            if (masterM3u8 != null && sources.none { it.url == masterM3u8 }) {
+                sources.add(
+                    StreamQualitySource(
+                        url = masterM3u8,
+                        quality = if (sources.isEmpty()) "Auto" else "Direct HLS",
+                        isM3u8 = true
+                    )
+                )
+            }
+
+            // 3. Parse `qualities` array (preferring each quality's hlsProxyUrl when available)
             val qualitiesArr = dataObj.optJSONArray("qualities") ?: root.optJSONArray("qualities")
             if (qualitiesArr != null) {
                 for (i in 0 until qualitiesArr.length()) {
                     val qObj = qualitiesArr.optJSONObject(i) ?: continue
-                    val qUrl = qObj.optString("url").takeNonNull()
-                        ?: qObj.optString("hlsProxyUrl").takeNonNull()
-                        ?: qObj.optString("src").takeNonNull()
+                    val qUrl = qObj.optString("hlsProxyUrl").takeValidStreamUrl()
+                        ?: qObj.optString("url").takeValidStreamUrl()
+                        ?: qObj.optString("src").takeValidStreamUrl()
                         ?: continue
                     val rawQuality = qObj.optString("quality").takeNonNull()
                         ?: qObj.optInt("height", 0).takeIf { it > 0 }?.let { "${it}p" }
                         ?: qObj.optString("resolution").takeNonNull()
                         ?: "1080p"
                     val normalizedQuality = normalizeQualityLabel(rawQuality)
+                    val isM3u8 = qUrl.contains(".m3u8", ignoreCase = true) ||
+                        qUrl.contains("/proxy/hls", ignoreCase = true) ||
+                        playbackMode == "hls"
                     if (sources.none { it.quality == normalizedQuality && it.url == qUrl }) {
                         sources.add(
                             StreamQualitySource(
                                 url = qUrl,
                                 quality = normalizedQuality,
-                                isM3u8 = true
+                                isM3u8 = isM3u8
                             )
                         )
                     }
                 }
             }
 
-            // 3. Parse `sources` or `streams` array if present
+            // 4. Parse `sources` or `streams` array if present
             val sourcesArr = dataObj.optJSONArray("sources")
                 ?: dataObj.optJSONArray("streams")
                 ?: root.optJSONArray("sources")
             if (sourcesArr != null) {
                 for (i in 0 until sourcesArr.length()) {
                     val sObj = sourcesArr.optJSONObject(i) ?: continue
-                    val url = sObj.optString("url").takeNonNull()
-                        ?: sObj.optString("file").takeNonNull()
-                        ?: sObj.optString("src").takeNonNull()
+                    val url = sObj.optString("hlsProxyUrl").takeValidStreamUrl()
+                        ?: sObj.optString("url").takeValidStreamUrl()
+                        ?: sObj.optString("file").takeValidStreamUrl()
+                        ?: sObj.optString("src").takeValidStreamUrl()
                         ?: continue
                     val rawQuality = sObj.optString("quality").takeNonNull()
                         ?: sObj.optString("label").takeNonNull()
@@ -553,27 +613,20 @@ object JsonParsers {
                 }
             }
 
-            // 4. Keep hlsProxyUrl or mp4ProxyUrl as fallback if not already added
-            if (hlsProxyUrl != null && sources.none { it.url == hlsProxyUrl }) {
-                sources.add(
-                    StreamQualitySource(
-                        url = hlsProxyUrl,
-                        quality = if (sources.isEmpty()) "Auto" else "Proxy",
-                        isM3u8 = true
-                    )
-                )
-            }
-            if (sources.isEmpty() && mp4ProxyUrl != null) {
+            // 5. Support direct MP4 when provided
+            if (mp4ProxyUrl != null && sources.none { it.url == mp4ProxyUrl }) {
                 sources.add(
                     StreamQualitySource(
                         url = mp4ProxyUrl,
-                        quality = "Auto",
+                        quality = if (sources.isEmpty()) "Auto" else "MP4",
                         isM3u8 = false
                     )
                 )
             }
 
-            if (sources.isEmpty()) return null
+            if (sources.isEmpty() || (iframeOnly && hlsProxyUrl == null && masterM3u8 == null && mp4ProxyUrl == null)) {
+                return null
+            }
 
             val subtitles = mutableListOf<SubtitleTrack>()
             val subsArr = dataObj.optJSONArray("subtitles")
@@ -584,16 +637,29 @@ object JsonParsers {
             if (subsArr != null) {
                 for (i in 0 until subsArr.length()) {
                     val subObj = subsArr.optJSONObject(i) ?: continue
-                    val kind = subObj.optString("kind", "captions").lowercase()
+                    val kind = subObj.optString("kind", "captions").lowercase(Locale.ROOT)
                     if (kind == "thumbnails" || kind == "sprites") continue
-                    val subUrl = subObj.optString("url").takeNonNull()
+
+                    val subUrl = subObj.optString("proxyUrl").takeNonNull()
+                        ?: subObj.optString("url").takeNonNull()
                         ?: subObj.optString("src").takeNonNull()
                         ?: subObj.optString("file").takeNonNull()
                         ?: continue
+
+                    if (subUrl.contains("thumbnails.vtt", ignoreCase = true) ||
+                        subUrl.contains("sprites.vtt", ignoreCase = true) ||
+                        subUrl.contains("/preview/thumbnails", ignoreCase = true) ||
+                        subUrl.contains("%2Fpreview%2Fthumbnails", ignoreCase = true)
+                    ) {
+                        continue
+                    }
+
                     val lang = subObj.optString("lang").takeNonNull()
                         ?: subObj.optString("language").takeNonNull()
                         ?: subObj.optString("label").takeNonNull()
                         ?: "English"
+                    if (lang.equals("thumbnails", ignoreCase = true)) continue
+
                     val label = subObj.optString("label").takeNonNull() ?: lang
                     val isDefault = subObj.optBoolean("default", false)
                     subtitles.add(
@@ -608,8 +674,6 @@ object JsonParsers {
             }
 
             val headers = mutableMapOf<String, String>()
-            val embedUrl = dataObj.optString("embedUrl").takeNonNull()
-                ?: root.optString("embedUrl").takeNonNull()
             if (embedUrl != null) {
                 headers["Referer"] = embedUrl
                 runCatching {

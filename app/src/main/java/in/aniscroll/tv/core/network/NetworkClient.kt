@@ -6,6 +6,8 @@ import `in`.aniscroll.tv.data.remote.AniSkipApi
 import `in`.aniscroll.tv.data.remote.FanartApi
 import `in`.aniscroll.tv.data.remote.HoshikaApi
 import `in`.aniscroll.tv.data.remote.TmdbApi
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
@@ -13,12 +15,12 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
- * Bounded retry interceptor with exponential backoff for transient network/5xx errors.
- * Does NOT retry 400, 401, 403, 404, or 422 responses.
+ * Bounded retry interceptor with fast exponential backoff for transient network/5xx errors.
+ * Does NOT retry 400, 401, 403, 404, 422, or 429 responses.
  */
 class BoundedRetryInterceptor(
     private val maxRetries: Int = 2,
-    private val initialDelayMs: Long = 400L
+    private val initialDelayMs: Long = 200L
 ) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): okhttp3.Response {
         val request = chain.request()
@@ -56,6 +58,25 @@ class BoundedRetryInterceptor(
 
 object NetworkModule {
 
+    private const val DEFAULT_USER_AGENT =
+        "Mozilla/5.0 (Linux; Android 14; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 AniScrollTV/1.0"
+
+    /**
+     * Shared HTTP connection pool and dispatcher reused across Retrofit API calls AND ExoPlayer
+     * HLS manifest/segment transfers so TLS/HTTP2 sockets to https://anivault-scraper-five.vercel.app
+     * stay warm and concurrent segment loads never bottleneck behind a 5-per-host limit.
+     */
+    private val sharedConnectionPool: ConnectionPool by lazy {
+        ConnectionPool(maxIdleConnections = 16, keepAliveDuration = 5, TimeUnit.MINUTES)
+    }
+
+    private val sharedDispatcher: Dispatcher by lazy {
+        Dispatcher().apply {
+            maxRequests = 64
+            maxRequestsPerHost = 12
+        }
+    }
+
     fun isConfiguredSecret(value: String?): Boolean {
         val trimmed = value?.trim()
         return !trimmed.isNullOrEmpty() &&
@@ -75,21 +96,26 @@ object NetworkModule {
         return isConfiguredSecret(key)
     }
 
+    /**
+     * Shared OkHttpClient for REST API requests (Hoshika, AniScroll Watch, AniSkip, TMDB, Fanart).
+     */
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(40, TimeUnit.SECONDS)
-            .writeTimeout(20, TimeUnit.SECONDS)
+            .connectionPool(sharedConnectionPool)
+            .dispatcher(sharedDispatcher)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .retryOnConnectionFailure(true)
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
             .addInterceptor { chain ->
                 val original = chain.request()
                 val host = original.url.host.lowercase()
                 var url = original.url
                 val builder = original.newBuilder()
                     .header("Accept", "application/json")
-                    .header(
-                        "User-Agent",
-                        "Mozilla/5.0 (Linux; Android 14; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 AniScrollTV/1.0"
-                    )
+                    .header("User-Agent", DEFAULT_USER_AGENT)
 
                 when {
                     host.contains("hoshika.app") -> {
@@ -102,7 +128,6 @@ object NetworkModule {
                     host.contains("api.themoviedb.org") -> {
                         val tmdbSecret = runCatching { BuildConfig.TMDB_API_KEY }.getOrNull()?.trim()
                         if (isConfiguredSecret(tmdbSecret)) {
-                            // Support both TMDB v4 Bearer JWT tokens (eyJ...) and v3 API keys
                             if (tmdbSecret!!.startsWith("eyJ") || tmdbSecret.length > 40) {
                                 builder.header("Authorization", "Bearer $tmdbSecret")
                             } else if (url.queryParameter("api_key") == null) {
@@ -135,7 +160,25 @@ object NetworkModule {
 
                 chain.proceed(builder.build())
             }
-            .addInterceptor(BoundedRetryInterceptor(maxRetries = 2))
+            .addInterceptor(BoundedRetryInterceptor(maxRetries = 1))
+            .build()
+    }
+
+    /**
+     * Dedicated OkHttpClient for Media3 ExoPlayer HLS manifest, segment, and subtitle requests.
+     * Shares [sharedConnectionPool] and [sharedDispatcher] with API clients for warm HTTP/2 reuse,
+     * follows cross-protocol/CDN redirects cleanly, and avoids API-only JSON headers.
+     */
+    val streamingOkHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectionPool(sharedConnectionPool)
+            .dispatcher(sharedDispatcher)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .retryOnConnectionFailure(true)
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(12, TimeUnit.SECONDS)
             .build()
     }
 
@@ -179,5 +222,13 @@ object NetworkModule {
             .client(okHttpClient)
             .build()
             .create(AniSkipApi::class.java)
+    }
+
+    val aniListGraphQlApi: `in`.aniscroll.tv.data.remote.AniListGraphQlApi by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://graphql.anilist.co/")
+            .client(okHttpClient)
+            .build()
+            .create(`in`.aniscroll.tv.data.remote.AniListGraphQlApi::class.java)
     }
 }

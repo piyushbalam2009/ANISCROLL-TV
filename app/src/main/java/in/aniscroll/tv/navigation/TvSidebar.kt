@@ -115,13 +115,13 @@ fun TvNavigationSidebar(
                 modifier = Modifier
                     .size(32.dp)
                     .clip(RoundedCornerShape(6.dp))
-                    .background(TvColors.PrimaryText),
+                    .background(TvColors.ElevatedSurface)
+                    .border(0.5.dp, TvColors.Divider, RoundedCornerShape(6.dp)),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "A",
-                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                    color = TvColors.MainBackground
+                `in`.aniscroll.tv.core.designsystem.AniScrollBrandLogo(
+                    size = 22.dp,
+                    contentDescription = "AniScroll Logo"
                 )
             }
             AnimatedVisibility(

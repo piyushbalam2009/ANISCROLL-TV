@@ -159,13 +159,17 @@ fun EpisodesScreen(
         }
 
         when {
-            state.isLoading -> {
-                TvLoadingIndicator(message = "Loading episodes...")
+            state.isLoading || (state.isEpisodesLoading && state.episodes.isEmpty()) -> {
+                `in`.aniscroll.tv.core.designsystem.TvEpisodeListSkeleton(
+                    title = `in`.aniscroll.tv.core.designsystem.TvContentLoadingCopy.LOADING_EPISODES,
+                    subtitle = "Loading episodes...",
+                    itemCount = 5
+                )
             }
             state.episodes.isEmpty() -> {
                 TvErrorBanner(
                     message = "No episode list is currently available from Hoshika for this anime.",
-                    onRetry = { viewModel.loadAnime(hoshikaId) }
+                    onRetry = { viewModel.loadAnime(hoshikaId, forceRefresh = true) }
                 )
             }
             else -> {

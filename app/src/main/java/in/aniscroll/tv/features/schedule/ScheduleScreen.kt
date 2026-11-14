@@ -88,17 +88,24 @@ class ScheduleViewModel(
     private val _uiState = MutableStateFlow(ScheduleUiState())
     val uiState: StateFlow<ScheduleUiState> = _uiState.asStateFlow()
 
+    private var scheduleJob: kotlinx.coroutines.Job? = null
+
     init {
         loadSchedule(_uiState.value.selectedDay)
     }
 
     fun selectDay(day: String) {
+        val current = _uiState.value
+        if (current.selectedDay.equals(day, ignoreCase = true) && !current.isLoading && current.errorMessage == null && current.items.isNotEmpty()) {
+            return
+        }
         _uiState.update { it.copy(selectedDay = day) }
         loadSchedule(day)
     }
 
     fun loadSchedule(day: String = _uiState.value.selectedDay) {
-        viewModelScope.launch {
+        scheduleJob?.cancel()
+        scheduleJob = viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, errorMessage = null) }
             when (val res = animeRepository.getSchedule(day)) {
                 is ResourceResult.Success -> {
@@ -166,7 +173,10 @@ fun ScheduleScreen(
 
         when {
             state.isLoading -> {
-                TvLoadingIndicator(message = "Loading ${state.selectedDay} schedule from Hoshika...")
+                `in`.aniscroll.tv.core.designsystem.TvScheduleListSkeleton(
+                    title = `in`.aniscroll.tv.core.designsystem.TvContentLoadingCopy.LOADING_ANIME,
+                    subtitle = "Loading ${state.selectedDay} schedule from Hoshika..."
+                )
             }
             state.errorMessage != null -> {
                 TvErrorBanner(
@@ -176,10 +186,11 @@ fun ScheduleScreen(
             }
             state.items.isEmpty() -> {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "No scheduled broadcasts returned by Hoshika for ${state.selectedDay}.",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TvColors.SecondaryText
+                    `in`.aniscroll.tv.core.designsystem.TvEmptyStateBanner(
+                        title = "No scheduled broadcasts for ${state.selectedDay}.",
+                        subtitle = "Select another day of the week above.",
+                        actionLabel = "Retry",
+                        onAction = { viewModel.loadSchedule() }
                     )
                 }
             }

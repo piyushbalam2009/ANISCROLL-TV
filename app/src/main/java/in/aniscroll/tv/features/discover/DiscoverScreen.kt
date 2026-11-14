@@ -82,11 +82,17 @@ class DiscoverViewModel(
     private val _uiState = MutableStateFlow(DiscoverUiState())
     val uiState: StateFlow<DiscoverUiState> = _uiState.asStateFlow()
 
+    private var discoverJob: kotlinx.coroutines.Job? = null
+
     init {
         loadDiscover(resetPage = true)
     }
 
     fun selectCategory(category: String) {
+        val current = _uiState.value
+        if (current.selectedCategory == category && current.selectedGenre == null && !current.isLoading && current.errorMessage == null) {
+            return
+        }
         _uiState.update {
             it.copy(selectedCategory = category, selectedGenre = null, page = 1)
         }
@@ -110,11 +116,12 @@ class DiscoverViewModel(
     }
 
     fun loadDiscover(resetPage: Boolean = true) {
-        viewModelScope.launch {
+        discoverJob?.cancel()
+        discoverJob = viewModelScope.launch {
             val state = _uiState.value
             val targetPage = if (resetPage) 1 else state.page
             if (resetPage) {
-                _uiState.update { it.copy(isLoading = true, errorMessage = null, page = 1) }
+                _uiState.update { it.copy(isLoading = true, isLoadingMore = false, errorMessage = null, page = 1) }
             }
 
             when (val res = animeRepository.getDiscoverAnime(
@@ -204,7 +211,10 @@ fun DiscoverScreen(
 
         when {
             state.isLoading -> {
-                TvLoadingIndicator(message = "Loading catalogue from Hoshika...")
+                `in`.aniscroll.tv.core.designsystem.TvPosterGridSkeleton(
+                    title = `in`.aniscroll.tv.core.designsystem.TvContentLoadingCopy.LOADING_ANIME,
+                    subtitle = "Loading ${state.selectedGenre ?: state.selectedCategory} anime..."
+                )
             }
             state.errorMessage != null && state.items.isEmpty() -> {
                 TvErrorBanner(
@@ -214,10 +224,11 @@ fun DiscoverScreen(
             }
             state.items.isEmpty() -> {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "No anime found for the selected filter.",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TvColors.SecondaryText
+                    `in`.aniscroll.tv.core.designsystem.TvEmptyStateBanner(
+                        title = "No anime found for the selected filter.",
+                        subtitle = "Try selecting another category or genre above.",
+                        actionLabel = "Retry",
+                        onAction = { viewModel.loadDiscover(resetPage = true) }
                     )
                 }
             }
@@ -241,10 +252,17 @@ fun DiscoverScreen(
 
                     if (state.canLoadMore) {
                         item(span = { GridItemSpan(maxLineSpan) }) {
-                            Row(
+                            Column(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
-                                horizontalArrangement = Arrangement.Center
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
+                                if (state.isLoadingMore) {
+                                    `in`.aniscroll.tv.core.designsystem.TvSectionLoadingHeader(
+                                        label = `in`.aniscroll.tv.core.designsystem.TvContentLoadingCopy.LOADING_ANIME,
+                                        detailText = "Loading more titles..."
+                                    )
+                                }
                                 TvFocusableButton(
                                     text = if (state.isLoadingMore) "Loading..." else "Load More",
                                     enabled = !state.isLoadingMore,

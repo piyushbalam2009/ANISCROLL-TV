@@ -34,6 +34,8 @@ import `in`.aniscroll.tv.features.history.HistoryScreen
 import `in`.aniscroll.tv.features.history.HistoryViewModel
 import `in`.aniscroll.tv.features.home.HomeScreen
 import `in`.aniscroll.tv.features.home.HomeViewModel
+import `in`.aniscroll.tv.features.launch.AniScrollLaunchScreen
+import `in`.aniscroll.tv.features.launch.LaunchViewModel
 import `in`.aniscroll.tv.features.schedule.ScheduleScreen
 import `in`.aniscroll.tv.features.schedule.ScheduleViewModel
 import `in`.aniscroll.tv.features.search.SearchScreen
@@ -42,14 +44,20 @@ import `in`.aniscroll.tv.features.settings.SettingsScreen
 import `in`.aniscroll.tv.features.settings.SettingsViewModel
 import `in`.aniscroll.tv.features.watchlist.WatchlistScreen
 import `in`.aniscroll.tv.features.watchlist.WatchlistViewModel
+import `in`.aniscroll.tv.features.watchorder.WatchOrderScreen
+import `in`.aniscroll.tv.features.watchorder.WatchOrderViewModel
 import `in`.aniscroll.tv.navigation.TvDestination
 import `in`.aniscroll.tv.navigation.TvNavigationSidebar
 import `in`.aniscroll.tv.player.PlaybackController
 import `in`.aniscroll.tv.player.PlayerScreen
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 sealed class TvScreenRoute {
     data class MainTab(val destination: TvDestination) : TvScreenRoute()
     data class AnimeDetails(val hoshikaId: Long) : TvScreenRoute()
+    data class WatchOrder(val hoshikaId: Long) : TvScreenRoute()
     data class EpisodesBrowser(val hoshikaId: Long) : TvScreenRoute()
     data class VideoPlayer(
         val hoshikaId: Long,
@@ -85,6 +93,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         if (::appContainer.isInitialized) {
             appContainer.exoPlayerManager.releasePlayer()
+            appContainer.networkMonitor.unregister()
         }
         super.onDestroy()
     }
@@ -99,15 +108,30 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun AniScrollTvApp(
-    appContainer: AppContainer
+    appContainer: AppContainer,
+    showLaunchScreenOnStart: Boolean = true
 ) {
     val homeViewModel = remember { HomeViewModel(appContainer.animeRepository) }
+    val launchViewModel = remember {
+        LaunchViewModel(
+            preferencesRepository = appContainer.preferencesRepository,
+            animeRepository = appContainer.animeRepository,
+            homeViewModel = homeViewModel
+        ).also { vm ->
+            if (!showLaunchScreenOnStart) {
+                vm.markStartupComplete()
+            }
+        }
+    }
+    val launchState by launchViewModel.uiState.collectAsStateWithLifecycle()
+
     val searchViewModel = remember { SearchViewModel(appContainer.animeRepository) }
     val discoverViewModel = remember { DiscoverViewModel(appContainer.animeRepository) }
     val scheduleViewModel = remember { ScheduleViewModel(appContainer.animeRepository) }
     val watchlistViewModel = remember { WatchlistViewModel(appContainer.animeRepository) }
     val historyViewModel = remember { HistoryViewModel(appContainer.animeRepository) }
     val detailsViewModel = remember { DetailsViewModel(appContainer.animeRepository) }
+    val watchOrderViewModel = remember { WatchOrderViewModel(appContainer.animeRepository) }
     val settingsViewModel = remember {
         SettingsViewModel(appContainer.preferencesRepository, appContainer.dao)
     }
@@ -116,7 +140,8 @@ fun AniScrollTvApp(
             exoPlayerManager = appContainer.exoPlayerManager,
             animeRepository = appContainer.animeRepository,
             playbackRepository = appContainer.playbackRepository,
-            preferencesRepository = appContainer.preferencesRepository
+            preferencesRepository = appContainer.preferencesRepository,
+            networkMonitor = appContainer.networkMonitor
         )
     }
 
@@ -144,27 +169,35 @@ fun AniScrollTvApp(
         }
     }
 
-    BackHandler(enabled = navigationBackStack.size > 1 || currentTab != TvDestination.HOME) {
+    BackHandler(enabled = launchState.isReadyToNavigate && (navigationBackStack.size > 1 || currentTab != TvDestination.HOME)) {
         popRoute()
     }
 
-    when (activeRoute) {
-        is TvScreenRoute.VideoPlayer -> {
-            PlayerScreen(
-                hoshikaId = activeRoute.hoshikaId,
-                episodeNumber = activeRoute.episodeNumber,
-                initialLanguage = activeRoute.preferredLanguage,
-                controller = playbackController,
-                onExitPlayer = { popRoute() }
-            )
-        }
-        else -> {
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(TvColors.MainBackground)
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
-            ) {
+    Crossfade(
+        targetState = launchState.isReadyToNavigate,
+        animationSpec = tween(durationMillis = 360),
+        label = "launch_to_main_crossfade"
+    ) { isReady ->
+        if (!isReady) {
+            AniScrollLaunchScreen(statusText = launchState.statusText)
+        } else {
+            when (activeRoute) {
+                is TvScreenRoute.VideoPlayer -> {
+                    PlayerScreen(
+                        hoshikaId = activeRoute.hoshikaId,
+                        episodeNumber = activeRoute.episodeNumber,
+                        initialLanguage = activeRoute.preferredLanguage,
+                        controller = playbackController,
+                        onExitPlayer = { popRoute() }
+                    )
+                }
+                else -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(TvColors.MainBackground)
+                            .windowInsetsPadding(WindowInsets.safeDrawing)
+                    ) {
                 TvNavigationSidebar(
                     selectedDestination = currentTab,
                     onSelectDestination = { destination ->
@@ -235,6 +268,19 @@ fun AniScrollTvApp(
                                 onOpenEpisodesScreen = { id ->
                                     pushRoute(TvScreenRoute.EpisodesBrowser(id))
                                 },
+                                onOpenWatchOrder = { id ->
+                                    pushRoute(TvScreenRoute.WatchOrder(id))
+                                },
+                                onBack = { popRoute() }
+                            )
+                        }
+                        is TvScreenRoute.WatchOrder -> {
+                            WatchOrderScreen(
+                                hoshikaId = activeRoute.hoshikaId,
+                                viewModel = watchOrderViewModel,
+                                onOpenAnimeDetails = { id ->
+                                    pushRoute(TvScreenRoute.AnimeDetails(id))
+                                },
                                 onBack = { popRoute() }
                             )
                         }
@@ -253,5 +299,7 @@ fun AniScrollTvApp(
                 }
             }
         }
+        }
     }
+}
 }

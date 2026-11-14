@@ -62,7 +62,7 @@ import `in`.aniscroll.tv.domain.model.SubtitlePreferences
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private const val CONTROLS_AUTO_HIDE_MS = 3000L
+private const val CONTROLS_AUTO_HIDE_MS = 3500L
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -82,6 +82,7 @@ fun PlayerScreen(
     var lastUserInteractionMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var activeSettingsPanel by remember { mutableStateOf(PlayerSettingsPanel.NONE) }
     var lastFocusTarget by remember { mutableStateOf(PlayerFocusTarget.PLAY_PAUSE) }
+    var isSeeking by remember { mutableStateOf(false) }
 
     val surfaceFocusRequester = remember { FocusRequester() }
     val skipButtonFocusRequester = remember { FocusRequester() }
@@ -114,9 +115,9 @@ fun PlayerScreen(
         }
     }
 
-    // Auto-hide controls after 3 seconds of inactivity while playing (unless a settings panel is open)
-    LaunchedEffect(controlsVisible, lastUserInteractionMs, state.isPlaying, activeSettingsPanel) {
-        if (controlsVisible && state.isPlaying && activeSettingsPanel == PlayerSettingsPanel.NONE) {
+    // Auto-hide controls after inactivity while playing (never while seeking or while a menu is open)
+    LaunchedEffect(controlsVisible, lastUserInteractionMs, state.isPlaying, activeSettingsPanel, isSeeking) {
+        if (controlsVisible && state.isPlaying && activeSettingsPanel == PlayerSettingsPanel.NONE && !isSeeking) {
             delay(CONTROLS_AUTO_HIDE_MS)
             controlsVisible = false
         }
@@ -137,7 +138,8 @@ fun PlayerScreen(
         }
     }
 
-    // Back button closes settings panels first, then immediately stops & exits the player
+    // Back button closes settings panels first (restoring focus to the button that opened it),
+    // then immediately stops & exits the player
     BackHandler {
         when {
             activeSettingsPanel != PlayerSettingsPanel.NONE -> {
@@ -173,6 +175,20 @@ fun PlayerScreen(
                             controlsVisible = true
                             return@onPreviewKeyEvent true
                         }
+                        KeyEvent.KEYCODE_MEDIA_REWIND,
+                        KeyEvent.KEYCODE_MEDIA_STEP_BACKWARD,
+                        KeyEvent.KEYCODE_BUTTON_L1 -> {
+                            controller.seekRelative(-10_000L)
+                            controlsVisible = true
+                            return@onPreviewKeyEvent true
+                        }
+                        KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+                        KeyEvent.KEYCODE_MEDIA_STEP_FORWARD,
+                        KeyEvent.KEYCODE_BUTTON_R1 -> {
+                            controller.seekRelative(10_000L)
+                            controlsVisible = true
+                            return@onPreviewKeyEvent true
+                        }
                         KeyEvent.KEYCODE_MEDIA_NEXT -> {
                             controller.playNextEpisodeNow()
                             return@onPreviewKeyEvent true
@@ -181,22 +197,33 @@ fun PlayerScreen(
                             controller.playPreviousEpisode()
                             return@onPreviewKeyEvent true
                         }
+                        KeyEvent.KEYCODE_MENU -> {
+                            if (activeSettingsPanel != PlayerSettingsPanel.NONE) {
+                                activeSettingsPanel = PlayerSettingsPanel.NONE
+                            } else {
+                                controlsVisible = !controlsVisible
+                            }
+                            return@onPreviewKeyEvent true
+                        }
                     }
 
                     if (!controlsVisible && state.errorMessage == null &&
                         keyCode in listOf(
                             KeyEvent.KEYCODE_DPAD_CENTER,
                             KeyEvent.KEYCODE_ENTER,
+                            KeyEvent.KEYCODE_NUMPAD_ENTER,
+                            KeyEvent.KEYCODE_BUTTON_A,
                             KeyEvent.KEYCODE_DPAD_UP,
                             KeyEvent.KEYCODE_DPAD_DOWN,
                             KeyEvent.KEYCODE_DPAD_LEFT,
-                            KeyEvent.KEYCODE_DPAD_RIGHT,
-                            KeyEvent.KEYCODE_MENU
+                            KeyEvent.KEYCODE_DPAD_RIGHT
                         )
                     ) {
                         // Allow AniSkip button activation if skip button currently holds focus on ENTER/CENTER
                         val isCenterKey = keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
-                            keyCode == KeyEvent.KEYCODE_ENTER
+                            keyCode == KeyEvent.KEYCODE_ENTER ||
+                            keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER ||
+                            keyCode == KeyEvent.KEYCODE_BUTTON_A
                         if (isCenterKey && state.activeSkipPrompt != null) {
                             return@onPreviewKeyEvent false
                         }
@@ -208,33 +235,33 @@ fun PlayerScreen(
             }
             .focusable()
     ) {
-        // 1. Stationary Media3 PlayerView Surface (completely isolated from 500ms progress ticks)
+        // 1. Stationary Media3 PlayerView Surface
         PlayerVideoSurface(
             exoPlayer = exoPlayer,
             subtitlePrefs = settings.subtitlePreferences,
             subtitleManager = controller.subtitleManager
         )
 
-        // 2. Compact Buffering / Loading Indicator
+        // 2. Minimal Buffering / Loading Indicator
         if (state.isLoading || state.isBuffering) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .clip(RoundedCornerShape(6.dp))
+                    .clip(RoundedCornerShape(50))
                     .background(TvColors.MainBackground.copy(alpha = 0.72f))
-                    .padding(horizontal = 18.dp, vertical = 12.dp),
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(
                         color = TvColors.PrimaryText,
                         strokeWidth = 2.dp,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(18.dp)
                     )
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
                     Text(
                         text = if (state.isLoading) "Loading..." else "Buffering...",
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodySmall,
                         color = TvColors.PrimaryText
                     )
                 }
@@ -290,10 +317,9 @@ fun PlayerScreen(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(top = 20.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(TvColors.SecondaryBackground.copy(alpha = 0.88f))
-                    .border(1.dp, TvColors.PrimaryText.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(TvColors.SecondaryBackground.copy(alpha = 0.90f))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
                 Text(
                     text = msg,
@@ -303,14 +329,14 @@ fun PlayerScreen(
             }
         }
 
-        // 5. Right-Side Minimal Transparent Green AniSkip Overlay Button
+        // 5. Minimal White-Theme Skip Intro / Skip Outro Pill Button
         AnimatedVisibility(
             visible = state.activeSkipPrompt != null && state.errorMessage == null && activeSettingsPanel == PlayerSettingsPanel.NONE,
             enter = fadeIn(tween(150)),
             exit = fadeOut(tween(150)),
             modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 28.dp)
+                .align(Alignment.BottomEnd)
+                .padding(end = 32.dp, bottom = if (controlsVisible) 104.dp else 36.dp)
         ) {
             state.activeSkipPrompt?.let { prompt ->
                 LaunchedEffect(prompt.type, controlsVisible) {
@@ -318,13 +344,14 @@ fun PlayerScreen(
                         runCatching { skipButtonFocusRequester.requestFocus() }
                     }
                 }
-                TvFocusableButton(
-                    text = prompt.label,
-                    isAccentGreen = true,
+                SkipIntroOutroButton(
+                    prompt = prompt,
                     focusRequester = skipButtonFocusRequester,
-                    onClick = { controller.performSkip(prompt) },
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                    modifier = Modifier.testTag("player_aniskip_button")
+                    onFocused = recordActivity,
+                    onClick = {
+                        recordActivity()
+                        controller.performSkip(prompt)
+                    }
                 )
             }
         }
@@ -336,15 +363,15 @@ fun PlayerScreen(
             exit = fadeOut(tween(150)),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(end = 28.dp, bottom = 92.dp)
+                .padding(end = 32.dp, bottom = 96.dp)
         ) {
             state.nextEpisode?.let { nextEp ->
                 Column(
                     modifier = Modifier
                         .widthIn(min = 240.dp, max = 320.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(TvColors.SecondaryBackground.copy(alpha = 0.94f))
-                        .border(1.dp, TvColors.PrimaryText.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(TvColors.MainBackground.copy(alpha = 0.94f))
+                        .border(1.dp, TvColors.PrimaryText.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
                         .padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -378,7 +405,7 @@ fun PlayerScreen(
             }
         }
 
-        // 7. Compact Netflix-Style Controls Overlay
+        // 7. Minimalist Circular Controls Overlay
         AnimatedVisibility(
             visible = controlsVisible && state.errorMessage == null,
             enter = fadeIn(tween(150)),
@@ -399,6 +426,11 @@ fun PlayerScreen(
                 activePanel = activeSettingsPanel,
                 canInteract = controlsVisible && state.errorMessage == null,
                 lastFocusTarget = lastFocusTarget,
+                isMovie = `in`.aniscroll.tv.data.repository.StreamingSourceResolver.isMovie(state.anime?.format),
+                onSeekingChanged = { seeking ->
+                    isSeeking = seeking
+                    if (seeking) recordActivity()
+                },
                 onFocusTargetChanged = { lastFocusTarget = it },
                 onUserActivity = recordActivity,
                 onBackClick = {
@@ -410,8 +442,8 @@ fun PlayerScreen(
                 onTogglePlayPause = { controller.togglePlayPause() },
                 onNextEpisode = { controller.playNextEpisodeNow() },
                 onToggleAudioLanguage = {
-                    val nextLang = if (state.audioLanguage == "sub") "dub" else "sub"
-                    controller.switchAudioLanguage(nextLang)
+                    lastFocusTarget = PlayerFocusTarget.AUDIO
+                    activeSettingsPanel = PlayerSettingsPanel.AUDIO
                 },
                 onOpenSubtitlesPanel = {
                     lastFocusTarget = PlayerFocusTarget.SUBTITLES
@@ -428,13 +460,14 @@ fun PlayerScreen(
             )
         }
 
-        // 8. Compact Anchored Settings Panel (Quality / Subtitles / Playback Speed)
+        // 8. Compact Subtitle & Audio Track Selection Menus
         CompactPlayerSettingsOverlay(
             activePanel = activeSettingsPanel,
             state = state,
             subtitlePrefs = settings.subtitlePreferences,
             onSelectQuality = { option -> controller.selectQuality(option) },
             onSelectSpeed = { speed -> controller.setPlaybackSpeed(speed) },
+            onSelectAudioLanguage = { lang -> controller.switchAudioLanguage(lang) },
             onSelectSubtitleTrack = { lang, enabled -> controller.selectSubtitleTrack(lang, enabled) },
             onUpdateSubtitleSize = { size ->
                 controller.viewModelScope.launch {
@@ -449,6 +482,16 @@ fun PlayerScreen(
             onUpdateSubtitleBackground = { bg ->
                 controller.viewModelScope.launch {
                     controller.preferencesRepository.setSubtitleBackground(bg)
+                }
+            },
+            onUpdateSubtitleOutline = { outline ->
+                controller.viewModelScope.launch {
+                    controller.preferencesRepository.setSubtitleOutline(outline)
+                }
+            },
+            onUpdateSubtitlePosition = { position ->
+                controller.viewModelScope.launch {
+                    controller.preferencesRepository.setSubtitlePosition(position)
                 }
             },
             onUserActivity = recordActivity,

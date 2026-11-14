@@ -14,11 +14,19 @@ import `in`.aniscroll.tv.domain.model.Anime
 import `in`.aniscroll.tv.domain.model.Episode
 import `in`.aniscroll.tv.domain.model.ScheduleItem
 import `in`.aniscroll.tv.domain.model.WatchProgressItem
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
+
+private data class TimedCacheEntry<T>(
+    val value: T,
+    val cachedAtMs: Long
+)
 
 data class HomeSectionRow(
     val title: String,
@@ -41,8 +49,20 @@ class AnimeRepository(
     private val hoshikaApi: HoshikaApi,
     private val aniScrollApi: AniScrollApi,
     private val dao: AniScrollDao,
-    private val logoRepository: LogoRepository
+    private val logoRepository: LogoRepository,
+    private val aniListGraphQlApi: `in`.aniscroll.tv.data.remote.AniListGraphQlApi =
+        `in`.aniscroll.tv.core.network.NetworkModule.aniListGraphQlApi
 ) {
+
+    companion object {
+        private const val ANIME_CACHE_TTL_MS = 15 * 60 * 1000L // 15 minutes
+        private const val EPISODES_CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes
+        private const val WATCH_ORDER_CACHE_TTL_MS = 20 * 60 * 1000L // 20 minutes
+    }
+
+    private val animeMemoryCache = ConcurrentHashMap<Long, TimedCacheEntry<Anime>>()
+    private val episodesMemoryCache = ConcurrentHashMap<Long, TimedCacheEntry<List<Episode>>>()
+    private val watchOrderMemoryCache = ConcurrentHashMap<Long, TimedCacheEntry<`in`.aniscroll.tv.domain.model.FranchiseWatchOrder>>()
 
     val idConverter: HoshikaIdConverter = HoshikaIdConverter(
         dao = dao,
@@ -308,22 +328,62 @@ class AnimeRepository(
     }
 
     // --- Anime Details ---
-    suspend fun getAnimeDetails(hoshikaId: Long): ResourceResult<Anime> {
+    suspend fun getAnimeDetails(hoshikaId: Long): ResourceResult<Anime> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        animeMemoryCache[hoshikaId]?.takeIf { now - it.cachedAtMs < ANIME_CACHE_TTL_MS }?.value?.let { mem ->
+            if (!mem.logoUrl.isNullOrBlank() && !mem.format.isNullOrBlank()) {
+                return@withContext ResourceResult.Success(mem, isCachedFallback = false)
+            }
+        }
+
         val remote = fetchRemoteAnimeDetails(hoshikaId)
         if (remote != null) {
             val enriched = enrichAnimeWithLogo(remote)
             cacheAnime(enriched)
-            return ResourceResult.Success(enriched, isCachedFallback = false)
+            return@withContext ResourceResult.Success(enriched, isCachedFallback = false)
         }
 
         val cached = dao.getCachedAnime(hoshikaId)
         if (cached != null) {
             val enrichedCached = enrichAnimeWithLogo(cached.toDomain())
             cacheAnime(enrichedCached)
-            return ResourceResult.Success(enrichedCached, isCachedFallback = true)
+            return@withContext ResourceResult.Success(enrichedCached, isCachedFallback = true)
         }
 
-        return ResourceResult.Error("Anime information is unavailable.")
+        ResourceResult.Error("Anime information is unavailable.")
+    }
+
+    /**
+     * Ultra-fast metadata lookup for video playback startup and episode switching.
+     * - Reuses valid in-memory or Room cached anime metadata immediately when format is known.
+     * - Never blocks stream resolution on TMDB/Fanart logo enrichment requests.
+     */
+    suspend fun getAnimeForPlayback(hoshikaId: Long): ResourceResult<Anime> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        animeMemoryCache[hoshikaId]?.takeIf { now - it.cachedAtMs < ANIME_CACHE_TTL_MS }?.value?.let { mem ->
+            if (!mem.format.isNullOrBlank()) {
+                return@withContext ResourceResult.Success(mem, isCachedFallback = true)
+            }
+        }
+
+        val localCached = dao.getCachedAnime(hoshikaId)?.toDomain()
+        if (localCached != null && !localCached.format.isNullOrBlank()) {
+            animeMemoryCache[hoshikaId] = TimedCacheEntry(localCached, now)
+            return@withContext ResourceResult.Success(localCached, isCachedFallback = true)
+        }
+
+        val remote = fetchRemoteAnimeDetails(hoshikaId)
+        if (remote != null) {
+            cacheAnime(remote)
+            return@withContext ResourceResult.Success(remote, isCachedFallback = false)
+        }
+
+        if (localCached != null) {
+            animeMemoryCache[hoshikaId] = TimedCacheEntry(localCached, now)
+            return@withContext ResourceResult.Success(localCached, isCachedFallback = true)
+        }
+
+        ResourceResult.Error("Anime information is unavailable.")
     }
 
     suspend fun enrichAnimeWithLogo(anime: Anime, forceRefresh: Boolean = false): Anime {
@@ -355,71 +415,94 @@ class AnimeRepository(
         return updated
     }
 
-    private suspend fun fetchRemoteAnimeDetails(hoshikaId: Long): Anime? {
+    private suspend fun fetchRemoteAnimeDetails(hoshikaId: Long): Anime? = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        animeMemoryCache[hoshikaId]?.takeIf { now - it.cachedAtMs < ANIME_CACHE_TTL_MS }?.value?.let { mem ->
+            if (!mem.format.isNullOrBlank() && (!mem.englishTitle.isNullOrBlank() || mem.totalEpisodes != null)) {
+                return@withContext mem
+            }
+        }
+
         val raw = executeHoshikaGet(
             directCall = { hoshikaApi.getAnimeDetails(hoshikaId) },
             proxyPath = "anime/$hoshikaId"
-        ) ?: return null
+        ) ?: return@withContext null
 
-        val parsed = JsonParsers.parseSingleAnimeFromResponse(raw) ?: return null
+        val parsed = JsonParsers.parseSingleAnimeFromResponse(raw) ?: return@withContext null
         idConverter.cacheMappingIfValid(parsed.hoshikaId, parsed.anilistId)
-        return parsed
+        animeMemoryCache[hoshikaId] = TimedCacheEntry(parsed, System.currentTimeMillis())
+        parsed
     }
 
     // --- Anime Episodes ---
-    suspend fun getAnimeEpisodes(hoshikaId: Long, after: Int? = null): ResourceResult<List<Episode>> {
-        val allEpisodes = mutableListOf<Episode>()
-        var currentAfter = after
-        var pageCount = 0
-        var anyPageSucceeded = false
-
-        while (pageCount < 4) {
-            val raw = executeHoshikaGet(
-                directCall = { hoshikaApi.getAnimeEpisodes(shortId = hoshikaId, after = currentAfter, limit = 100) },
-                proxyPath = "anime/$hoshikaId/episodes"
-            ) ?: break
-
-            anyPageSucceeded = true
-            val pageEpisodes = JsonParsers.parseEpisodesFromResponse(hoshikaId, raw)
-            allEpisodes.addAll(pageEpisodes)
-
-            val nextAfter = runCatching {
-                val root = JSONObject(raw.trim())
-                if (root.isNull("nextAfter")) null else root.optInt("nextAfter", -1).takeIf { it > 0 }
-            }.getOrNull()
-
-            if (nextAfter == null || pageEpisodes.isEmpty() || after != null) {
-                break
+    suspend fun getAnimeEpisodes(hoshikaId: Long, after: Int? = null): ResourceResult<List<Episode>> =
+        withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            if (after == null) {
+                episodesMemoryCache[hoshikaId]?.takeIf { now - it.cachedAtMs < EPISODES_CACHE_TTL_MS }?.value?.let {
+                    return@withContext ResourceResult.Success(it, isCachedFallback = true)
+                }
             }
-            currentAfter = nextAfter
-            pageCount++
-        }
 
-        if (allEpisodes.isNotEmpty()) {
-            return ResourceResult.Success(allEpisodes.distinctBy { it.number }.sortedBy { it.number })
-        }
+            val allEpisodes = mutableListOf<Episode>()
+            var currentAfter = after
+            var pageCount = 0
+            var anyPageSucceeded = false
 
-        // If Hoshika returned 0 episode objects for an anime that has episodes, synthesize playable episode entries
-        val cachedAnime = dao.getCachedAnime(hoshikaId)?.toDomain() ?: fetchRemoteAnimeDetails(hoshikaId)
-        if (cachedAnime != null) {
-            val count = (cachedAnime.totalEpisodes ?: 12).coerceIn(1, 200)
-            val fallbackList = (1..count).map { epNum ->
-                Episode(
-                    id = "${hoshikaId}_ep_$epNum",
-                    hoshikaId = hoshikaId,
-                    number = epNum,
-                    title = "Episode $epNum",
-                    thumbnailUrl = cachedAnime.bannerUrl ?: cachedAnime.posterUrl
-                )
+            while (pageCount < 4) {
+                val raw = executeHoshikaGet(
+                    directCall = { hoshikaApi.getAnimeEpisodes(shortId = hoshikaId, after = currentAfter, limit = 100) },
+                    proxyPath = "anime/$hoshikaId/episodes"
+                ) ?: break
+
+                anyPageSucceeded = true
+                val pageEpisodes = JsonParsers.parseEpisodesFromResponse(hoshikaId, raw)
+                allEpisodes.addAll(pageEpisodes)
+
+                val nextAfter = runCatching {
+                    val root = JSONObject(raw.trim())
+                    if (root.isNull("nextAfter")) null else root.optInt("nextAfter", -1).takeIf { it > 0 }
+                }.getOrNull()
+
+                if (nextAfter == null || pageEpisodes.isEmpty() || after != null) {
+                    break
+                }
+                currentAfter = nextAfter
+                pageCount++
             }
-            return ResourceResult.Success(fallbackList)
-        }
 
-        if (anyPageSucceeded) {
-            return ResourceResult.Success(emptyList())
+            if (allEpisodes.isNotEmpty()) {
+                val sorted = allEpisodes.distinctBy { it.number }.sortedBy { it.number }
+                if (after == null) {
+                    episodesMemoryCache[hoshikaId] = TimedCacheEntry(sorted, System.currentTimeMillis())
+                }
+                return@withContext ResourceResult.Success(sorted)
+            }
+
+            // If Hoshika returned 0 episode objects for an anime that has episodes, synthesize playable episode entries
+            val cachedAnime = dao.getCachedAnime(hoshikaId)?.toDomain() ?: fetchRemoteAnimeDetails(hoshikaId)
+            if (cachedAnime != null) {
+                val count = (cachedAnime.totalEpisodes ?: 12).coerceIn(1, 200)
+                val fallbackList = (1..count).map { epNum ->
+                    Episode(
+                        id = "${hoshikaId}_ep_$epNum",
+                        hoshikaId = hoshikaId,
+                        number = epNum,
+                        title = "Episode $epNum",
+                        thumbnailUrl = cachedAnime.bannerUrl ?: cachedAnime.posterUrl
+                    )
+                }
+                if (after == null) {
+                    episodesMemoryCache[hoshikaId] = TimedCacheEntry(fallbackList, System.currentTimeMillis())
+                }
+                return@withContext ResourceResult.Success(fallbackList)
+            }
+
+            if (anyPageSucceeded) {
+                return@withContext ResourceResult.Success(emptyList())
+            }
+            ResourceResult.Error("Unable to connect. Check your internet connection.")
         }
-        return ResourceResult.Error("Unable to connect. Check your internet connection.")
-    }
 
     // --- Search ---
     suspend fun searchAnime(query: String, page: Int = 1): ResourceResult<List<Anime>> {
@@ -698,19 +781,23 @@ class AnimeRepository(
             logoUrl = anime.logoUrl ?: existingLogo?.logoUrl ?: existingAnime?.logoUrl,
             tmdbId = anime.tmdbId ?: existingLogo?.tmdbId ?: existingAnime?.tmdbId
         )
+        animeMemoryCache[merged.hoshikaId] = TimedCacheEntry(merged, System.currentTimeMillis())
         dao.insertAnime(merged.toEntity())
     }
 
     private suspend fun cacheAnimeBatch(list: List<Anime>) {
         if (list.isEmpty()) return
+        val now = System.currentTimeMillis()
         val entities = list.map { anime ->
             idConverter.cacheMappingIfValid(anime.hoshikaId, anime.anilistId)
             val existingAnime = dao.getCachedAnime(anime.hoshikaId)
             val existingLogo = dao.getLogoCache(anime.hoshikaId)?.takeIf { it.validationStatus == "VALID" }
-            anime.copy(
+            val merged = anime.copy(
                 logoUrl = anime.logoUrl ?: existingLogo?.logoUrl ?: existingAnime?.logoUrl,
                 tmdbId = anime.tmdbId ?: existingLogo?.tmdbId ?: existingAnime?.tmdbId
-            ).toEntity()
+            )
+            animeMemoryCache[merged.hoshikaId] = TimedCacheEntry(merged, now)
+            merged.toEntity()
         }
         dao.insertAnimeList(entities)
     }
@@ -768,4 +855,328 @@ class AnimeRepository(
         completed = completed,
         lastWatched = lastWatched
     )
+
+    // --- Franchise Watch Order (AniList GraphQL Relations + Hoshika Relations) ---
+    suspend fun getFranchiseWatchOrder(
+        hoshikaId: Long,
+        forceRefresh: Boolean = false
+    ): ResourceResult<`in`.aniscroll.tv.domain.model.FranchiseWatchOrder> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (!forceRefresh) {
+            watchOrderMemoryCache[hoshikaId]
+                ?.takeIf { now - it.cachedAtMs < WATCH_ORDER_CACHE_TTL_MS }
+                ?.value
+                ?.let { cachedOrder ->
+                    val refreshedOrder = refreshWatchOrderStatuses(cachedOrder)
+                    watchOrderMemoryCache[hoshikaId] = TimedCacheEntry(refreshedOrder, now)
+                    return@withContext ResourceResult.Success(refreshedOrder, isCachedFallback = true)
+                }
+        }
+
+        val rootAnimeResult = getAnimeForPlayback(hoshikaId)
+        val rootAnime = when (rootAnimeResult) {
+            is ResourceResult.Success -> rootAnimeResult.data
+            is ResourceResult.Error -> {
+                `in`.aniscroll.tv.data.local.UiPreviewFixtures.sampleAnimeList.find { it.hoshikaId == hoshikaId }
+                    ?: return@withContext ResourceResult.Error(rootAnimeResult.userMessage)
+            }
+        }
+
+        val resolvedTarget = idConverter.resolveTarget(rootAnime)
+        val rootAnilistId = resolvedTarget?.anilistId
+            ?: rootAnime.anilistId?.takeIf { it > 0L }
+            ?: rootAnime.hoshikaId
+
+        val nodesById = LinkedHashMap<Long, `in`.aniscroll.tv.features.watchorder.RawFranchiseMediaNode>()
+        val edges = mutableListOf<`in`.aniscroll.tv.features.watchorder.RawRelationEdge>()
+        val resolvedHoshikaIdsByAnilistId = mutableMapOf<Long, Long>()
+        resolvedHoshikaIdsByAnilistId[rootAnilistId] = rootAnime.hoshikaId
+
+        // 1. Collect Hoshika relations for direct shortId mappings and fallback
+        val hoshikaDetailsRaw = executeHoshikaGet(
+            directCall = { hoshikaApi.getAnimeDetails(hoshikaId) },
+            proxyPath = "anime/$hoshikaId"
+        )
+        val hoshikaRelationStubs = hoshikaDetailsRaw?.let {
+            `in`.aniscroll.tv.features.watchorder.WatchOrderGenerator.parseHoshikaRelationsFromDetails(it)
+        }.orEmpty()
+
+        // 2. Query AniList GraphQL with bounded BFS (up to 3 batched requests, max 36 anime nodes)
+        val expandedAnilistIds = mutableSetOf<Long>()
+        var frontierIds = listOf(rootAnilistId)
+        var hop = 0
+
+        while (frontierIds.isNotEmpty() && hop < 3 && nodesById.size < 36) {
+            val batchIds = frontierIds.filter { it > 0L && it !in expandedAnilistIds }.distinct().take(25)
+            if (batchIds.isEmpty()) break
+            expandedAnilistIds.addAll(batchIds)
+
+            val fetchedNodes = fetchAniListMediaBatch(batchIds)
+            if (fetchedNodes.isEmpty()) break
+
+            val nextFrontier = mutableListOf<Long>()
+            for (mediaNode in fetchedNodes) {
+                val existing = nodesById[mediaNode.anilistId]
+                nodesById[mediaNode.anilistId] = if (existing != null && mediaNode.relations.isEmpty()) {
+                    existing
+                } else {
+                    mediaNode
+                }
+
+                for ((relType, relatedNode) in mediaNode.relations) {
+                    if (`in`.aniscroll.tv.features.watchorder.WatchOrderGenerator.shouldIncludeAnimeNode(relatedNode, relType)) {
+                        if (nodesById.size < 36 || relatedNode.anilistId in nodesById) {
+                            nodesById.putIfAbsent(relatedNode.anilistId, relatedNode)
+                            edges.add(
+                                `in`.aniscroll.tv.features.watchorder.RawRelationEdge(
+                                    fromAnilistId = mediaNode.anilistId,
+                                    toAnilistId = relatedNode.anilistId,
+                                    relationType = relType
+                                )
+                            )
+                            if (relType in `in`.aniscroll.tv.features.watchorder.WatchOrderGenerator.CORE_EXPANSION_RELATIONS &&
+                                relatedNode.anilistId !in expandedAnilistIds &&
+                                nodesById.size < 36
+                            ) {
+                                nextFrontier.add(relatedNode.anilistId)
+                            }
+                        }
+                    }
+                }
+            }
+
+            frontierIds = nextFrontier.distinct()
+            hop++
+        }
+
+        // 3. Fallback to Hoshika relations if AniList GraphQL returned no franchise neighbors
+        if (nodesById.size <= 1 && hoshikaRelationStubs.isNotEmpty()) {
+            val rootNode = `in`.aniscroll.tv.features.watchorder.RawFranchiseMediaNode(
+                anilistId = rootAnilistId,
+                hoshikaId = rootAnime.hoshikaId,
+                malId = rootAnime.malId,
+                mediaType = "ANIME",
+                format = rootAnime.format ?: "TV",
+                status = rootAnime.status,
+                episodes = rootAnime.totalEpisodes,
+                releaseYear = rootAnime.releaseYear,
+                startDateNumeric = (rootAnime.releaseYear ?: 9999) * 10000 + 1332,
+                titleRomaji = rootAnime.title,
+                titleEnglish = rootAnime.englishTitle,
+                titleNative = rootAnime.japaneseTitle,
+                description = rootAnime.description,
+                posterUrl = rootAnime.posterUrl,
+                bannerUrl = rootAnime.bannerUrl
+            )
+            nodesById[rootAnilistId] = rootNode
+
+            for (stub in hoshikaRelationStubs) {
+                val stubDetails = fetchRemoteAnimeDetails(stub.shortId)
+                val stubAnilistId = stubDetails?.anilistId?.takeIf { it > 0L }
+                    ?: dao.getMapping(stub.shortId)?.anilistId?.takeIf { it > 0L }
+                    ?: stub.shortId
+                resolvedHoshikaIdsByAnilistId[stubAnilistId] = stub.shortId
+
+                val stubNode = `in`.aniscroll.tv.features.watchorder.RawFranchiseMediaNode(
+                    anilistId = stubAnilistId,
+                    hoshikaId = stub.shortId,
+                    malId = stubDetails?.malId,
+                    mediaType = "ANIME",
+                    format = stubDetails?.format ?: stub.format ?: "TV",
+                    status = stubDetails?.status,
+                    episodes = stubDetails?.totalEpisodes,
+                    releaseYear = stubDetails?.releaseYear,
+                    startDateNumeric = (stubDetails?.releaseYear ?: 9999) * 10000 + 1332,
+                    titleRomaji = stubDetails?.title ?: stub.title,
+                    titleEnglish = stubDetails?.englishTitle ?: stub.title,
+                    titleNative = stubDetails?.japaneseTitle,
+                    description = stubDetails?.description,
+                    posterUrl = stubDetails?.posterUrl ?: stub.coverImage,
+                    bannerUrl = stubDetails?.bannerUrl
+                )
+                nodesById[stubAnilistId] = stubNode
+                edges.add(
+                    `in`.aniscroll.tv.features.watchorder.RawRelationEdge(
+                        fromAnilistId = rootAnilistId,
+                        toAnilistId = stubAnilistId,
+                        relationType = stub.relationType
+                    )
+                )
+            }
+        }
+
+        // 4. Map AniList nodes to existing Hoshika shortIds (from Room cache or Hoshika relation stubs)
+        for ((anilistId, node) in nodesById) {
+            if (resolvedHoshikaIdsByAnilistId.containsKey(anilistId)) continue
+
+            val mappedFromRoom = dao.getMappingByAnilistId(anilistId)?.hoshikaId
+                ?: dao.getCachedAnimeByAnilistId(anilistId)?.hoshikaId
+            if (mappedFromRoom != null && mappedFromRoom > 0L) {
+                resolvedHoshikaIdsByAnilistId[anilistId] = mappedFromRoom
+                continue
+            }
+
+            // Check Hoshika relation stubs by title similarity
+            val nodeTitles = listOfNotNull(node.titleEnglish, node.titleRomaji, node.titleNative)
+                .map { it.lowercase().trim() }
+            val matchedStub = hoshikaRelationStubs.firstOrNull { stub ->
+                val stubTitle = stub.title.lowercase().trim()
+                nodeTitles.any { it == stubTitle }
+            }
+            if (matchedStub != null) {
+                resolvedHoshikaIdsByAnilistId[anilistId] = matchedStub.shortId
+            }
+        }
+
+        // 5. Gather watch status labels for all franchise entries
+        val watchStatusByHoshikaId = mutableMapOf<Long, String>()
+        for ( entryHoshikaId in resolvedHoshikaIdsByAnilistId.values.distinct()) {
+            computeWatchStatusLabel(entryHoshikaId)?.let { label ->
+                watchStatusByHoshikaId[entryHoshikaId] = label
+            }
+        }
+
+        val generated = `in`.aniscroll.tv.features.watchorder.WatchOrderGenerator.generateWatchOrder(
+            rootAnime = rootAnime,
+            rootAnilistId = rootAnilistId,
+            nodesById = nodesById,
+            edges = edges.distinct(),
+            resolvedHoshikaIdsByAnilistId = resolvedHoshikaIdsByAnilistId,
+            watchStatusByHoshikaId = watchStatusByHoshikaId
+        )
+
+        // 6. Pre-cache all franchise entries in Room so selecting any item in Watch Order
+        // opens DetailsScreen and streams immediately
+        for (entry in generated.recommendedOrder) {
+            cacheWatchOrderEntryIfAbsent(entry)
+        }
+
+        watchOrderMemoryCache[hoshikaId] = TimedCacheEntry(generated, System.currentTimeMillis())
+        ResourceResult.Success(generated)
+    }
+
+    /**
+     * Ensures that when a user selects an anime entry in the Watch Order screen,
+     * its real Hoshika shortId is resolved (if available in Hoshika search) and cached in Room
+     * so [DetailsScreen] opens seamlessly without duplicate screens or missing metadata.
+     */
+    suspend fun resolveAndCacheWatchOrderEntry(
+        entry: `in`.aniscroll.tv.domain.model.WatchOrderEntry
+    ): Long = withContext(Dispatchers.IO) {
+        if (!`in`.aniscroll.tv.features.watchorder.WatchOrderGenerator.isSyntheticHoshikaId(entry.hoshikaId)) {
+            cacheWatchOrderEntryIfAbsent(entry)
+            return@withContext entry.hoshikaId
+        }
+
+        // Check if Room already mapped this anilistId to a real Hoshika ID
+        val existingMapping = dao.getMappingByAnilistId(entry.anilistId)?.hoshikaId
+            ?.takeIf { !`in`.aniscroll.tv.features.watchorder.WatchOrderGenerator.isSyntheticHoshikaId(it) }
+        if (existingMapping != null) {
+            return@withContext existingMapping
+        }
+
+        // Try a quick search on Hoshika for the exact title & format
+        val searchQuery = entry.preferredTitle
+        val searchResp = runCatching { hoshikaApi.search(query = searchQuery, limit = 10) }.getOrNull()
+        val body = if (searchResp?.isSuccessful == true) searchResp.body()?.string()?.trim() else null
+        if (!body.isNullOrBlank() && (body.startsWith("{") || body.startsWith("["))) {
+            val candidates = JsonParsers.parseAnimeListFromResponse(body)
+            val normTargets = listOfNotNull(entry.englishTitle, entry.title, entry.japaneseTitle)
+                .map { it.lowercase().trim() }
+            val matched = candidates.firstOrNull { cand ->
+                val candTitles = listOfNotNull(cand.englishTitle, cand.title, cand.japaneseTitle)
+                    .map { it.lowercase().trim() }
+                val titleExact = candTitles.any { it in normTargets }
+                val yearMatch = entry.releaseYear == null || cand.releaseYear == null || cand.releaseYear == entry.releaseYear
+                titleExact && yearMatch
+            }
+            if (matched != null) {
+                val enriched = matched.copy(
+                    anilistId = entry.anilistId,
+                    malId = matched.malId ?: entry.malId,
+                    posterUrl = matched.posterUrl ?: entry.posterUrl,
+                    bannerUrl = matched.bannerUrl ?: entry.bannerUrl,
+                    description = matched.description ?: entry.description,
+                    releaseYear = matched.releaseYear ?: entry.releaseYear,
+                    format = matched.format ?: entry.format,
+                    totalEpisodes = matched.totalEpisodes ?: entry.episodes
+                )
+                cacheAnime(enriched)
+                return@withContext enriched.hoshikaId
+            }
+        }
+
+        cacheWatchOrderEntryIfAbsent(entry)
+        entry.hoshikaId
+    }
+
+    private suspend fun cacheWatchOrderEntryIfAbsent(
+        entry: `in`.aniscroll.tv.domain.model.WatchOrderEntry
+    ) {
+        val existing = dao.getCachedAnime(entry.hoshikaId)
+        val domainAnime = Anime(
+            hoshikaId = entry.hoshikaId,
+            anilistId = entry.anilistId,
+            malId = entry.malId,
+            title = entry.title,
+            englishTitle = entry.englishTitle ?: existing?.englishTitle,
+            japaneseTitle = entry.japaneseTitle ?: existing?.japaneseTitle,
+            description = entry.description ?: existing?.description ?: entry.relationshipExplanation,
+            posterUrl = entry.posterUrl ?: existing?.posterUrl,
+            bannerUrl = entry.bannerUrl ?: existing?.bannerUrl,
+            logoUrl = existing?.logoUrl,
+            releaseYear = entry.releaseYear ?: existing?.releaseYear,
+            status = entry.status ?: existing?.status,
+            format = entry.format,
+            totalEpisodes = entry.episodes ?: existing?.totalEpisodes
+        )
+        cacheAnime(domainAnime)
+    }
+
+    private suspend fun refreshWatchOrderStatuses(
+        order: `in`.aniscroll.tv.domain.model.FranchiseWatchOrder
+    ): `in`.aniscroll.tv.domain.model.FranchiseWatchOrder {
+        val allHoshikaIds = (order.recommendedOrder.map { it.hoshikaId } +
+            order.releaseOrder.map { it.hoshikaId } +
+            order.chronologicalOrder.map { it.hoshikaId }).distinct()
+
+        val statusMap = mutableMapOf<Long, String?>()
+        for (id in allHoshikaIds) {
+            statusMap[id] = computeWatchStatusLabel(id)
+        }
+
+        return order.copy(
+            recommendedOrder = order.recommendedOrder.map { it.copy(watchStatusLabel = statusMap[it.hoshikaId]) },
+            releaseOrder = order.releaseOrder.map { it.copy(watchStatusLabel = statusMap[it.hoshikaId]) },
+            chronologicalOrder = order.chronologicalOrder.map { it.copy(watchStatusLabel = statusMap[it.hoshikaId]) }
+        )
+    }
+
+    private suspend fun computeWatchStatusLabel(hoshikaId: Long): String? {
+        val lastWatched = dao.getLastWatchedForAnime(hoshikaId)
+        if (lastWatched != null) {
+            return if (lastWatched.completed) {
+                "Watched • Ep ${lastWatched.episodeNumber}"
+            } else {
+                "Watching • Ep ${lastWatched.episodeNumber}"
+            }
+        }
+        if (dao.isInWatchlist(hoshikaId)) {
+            return "In My List"
+        }
+        return null
+    }
+
+    private suspend fun fetchAniListMediaBatch(
+        ids: List<Long>
+    ): List<`in`.aniscroll.tv.features.watchorder.RawFranchiseMediaNode> {
+        if (ids.isEmpty()) return emptyList()
+        val payload = `in`.aniscroll.tv.features.watchorder.WatchOrderGenerator.buildBatchMediaRelationsQueryJson(ids)
+        val mediaType = with(okhttp3.MediaType) { "application/json; charset=utf-8".toMediaType() }
+        val requestBody = with(okhttp3.RequestBody) { payload.toRequestBody(mediaType) }
+        val resp = runCatching { aniListGraphQlApi.query(requestBody) }.getOrNull() ?: return emptyList()
+        if (!resp.isSuccessful) return emptyList()
+        val rawBody = resp.body()?.string()?.trim() ?: return emptyList()
+        return `in`.aniscroll.tv.features.watchorder.WatchOrderGenerator.parseAniListBatchMediaResponse(rawBody)
+    }
 }

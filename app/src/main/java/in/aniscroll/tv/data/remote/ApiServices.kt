@@ -129,6 +129,25 @@ interface HoshikaApi {
  */
 interface AniScrollApi {
 
+    /**
+     * Unified watch route:
+     * GET https://anivault-scraper-five.vercel.app/api/watch/{source}/{anilist_id}/{episode}/{sub|dub}
+     * where `source` is resolved by StreamingSourceResolver ("megaplay" for series, "zokoanime" for movies).
+     */
+    @GET("api/watch/{source}/{anilistId}/{episode}/{language}")
+    suspend fun getWatchStreams(
+        @Path("source") source: String,
+        @Path("anilistId") anilistId: Long,
+        @Path("episode") episode: Int,
+        @Path("language") language: String
+    ): Response<ResponseBody> {
+        return if (source.equals("zokoanime", ignoreCase = true)) {
+            getZokoAnimeStreams(anilistId = anilistId, episode = episode, language = language)
+        } else {
+            getMegaPlayStreams(anilistId = anilistId, episode = episode, language = language)
+        }
+    }
+
     @GET("api/watch/zokoanime/{anilistId}/{episode}/{language}")
     suspend fun getZokoAnimeStreams(
         @Path("anilistId") anilistId: Long,
@@ -235,3 +254,16 @@ interface AniSkipApi {
         @Query("episodeLength") episodeLength: Float = 0f
     ): Response<ResponseBody>
 }
+
+/**
+ * AniList GraphQL v2 API — Used for retrieving franchise relations and watch order graphs.
+ * Base URL: https://graphql.anilist.co/
+ */
+interface AniListGraphQlApi {
+
+    @retrofit2.http.POST("/")
+    suspend fun query(
+        @retrofit2.http.Body body: okhttp3.RequestBody
+    ): Response<ResponseBody>
+}
+

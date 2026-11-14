@@ -166,3 +166,79 @@ data class WatchProgressItem(
     val progressFraction: Float
         get() = if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
 }
+
+enum class WatchOrderMode(val label: String, val subtitle: String) {
+    RECOMMENDED(
+        label = "Recommended",
+        subtitle = "Optimal viewing sequence preserving story reveals and pacing"
+    ),
+    RELEASE(
+        label = "Release Order",
+        subtitle = "Ordered strictly by original broadcast and theatrical release dates"
+    ),
+    CHRONOLOGICAL(
+        label = "Chronological",
+        subtitle = "Ordered by in-universe narrative timeline from earliest events"
+    )
+}
+
+enum class FranchiseRelationCategory {
+    MAIN_SERIES,
+    DIRECT_SEQUEL,
+    DIRECT_PREQUEL,
+    CANONICAL_MOVIE,
+    OVA_SPECIAL,
+    SIDE_STORY,
+    SPIN_OFF,
+    SUMMARY_RECAP,
+    ALTERNATIVE
+}
+
+data class WatchOrderEntry(
+    val position: Int,
+    val anilistId: Long,
+    val hoshikaId: Long,
+    val malId: Long? = null,
+    val title: String,
+    val englishTitle: String? = null,
+    val japaneseTitle: String? = null,
+    val posterUrl: String? = null,
+    val bannerUrl: String? = null,
+    val description: String? = null,
+    val format: String = "TV",
+    val releaseYear: Int? = null,
+    val startDateNumeric: Int = 99999999,
+    val episodes: Int? = null,
+    val status: String? = null,
+    val rawRelationType: String = "MAIN",
+    val category: FranchiseRelationCategory = FranchiseRelationCategory.MAIN_SERIES,
+    val relationshipBadge: String = "Main Series",
+    val relationshipExplanation: String = "Core installment of the main storyline.",
+    val isOptional: Boolean = false,
+    val viewingTierBadge: String = "Essential",
+    val isCurrentAnime: Boolean = false,
+    val watchStatusLabel: String? = null
+) {
+    val preferredTitle: String
+        get() = englishTitle?.takeIf { it.isNotBlank() } ?: title
+}
+
+data class FranchiseWatchOrder(
+    val rootHoshikaId: Long,
+    val rootAnilistId: Long,
+    val franchiseTitle: String,
+    val franchiseBannerUrl: String? = null,
+    val franchiseCoverUrl: String? = null,
+    val sourceMaterialNote: String? = null,
+    val totalEntries: Int,
+    val recommendedOrder: List<WatchOrderEntry>,
+    val releaseOrder: List<WatchOrderEntry>,
+    val chronologicalOrder: List<WatchOrderEntry>
+) {
+    fun entriesForMode(mode: WatchOrderMode): List<WatchOrderEntry> = when (mode) {
+        WatchOrderMode.RECOMMENDED -> recommendedOrder
+        WatchOrderMode.RELEASE -> releaseOrder
+        WatchOrderMode.CHRONOLOGICAL -> chronologicalOrder
+    }
+}
+

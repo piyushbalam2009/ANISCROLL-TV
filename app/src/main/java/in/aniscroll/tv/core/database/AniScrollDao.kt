@@ -25,9 +25,15 @@ interface AniScrollDao {
     @Query("SELECT COUNT(*) FROM anime_cache")
     fun observeCachedAnimeCount(): Flow<Int>
 
-    // --- Anime ID Mappings (Hoshika -> AniList) ---
+    // --- Anime ID Mappings (Hoshika <-> AniList) ---
     @Query("SELECT * FROM anime_id_mappings WHERE hoshika_id = :hoshikaId LIMIT 1")
     suspend fun getMapping(hoshikaId: Long): AnimeIdMappingEntity?
+
+    @Query("SELECT * FROM anime_id_mappings WHERE anilist_id = :anilistId LIMIT 1")
+    suspend fun getMappingByAnilistId(anilistId: Long): AnimeIdMappingEntity?
+
+    @Query("SELECT * FROM anime_cache WHERE anilist_id = :anilistId LIMIT 1")
+    suspend fun getCachedAnimeByAnilistId(anilistId: Long): AnimeEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMapping(mapping: AnimeIdMappingEntity)

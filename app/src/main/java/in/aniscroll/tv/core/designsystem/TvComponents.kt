@@ -465,26 +465,35 @@ fun TvErrorBanner(
 
 @Composable
 fun TvLoadingIndicator(
-    message: String = "Loading...",
-    modifier: Modifier = Modifier
+    message: String = TvContentLoadingCopy.LOADING_ANIME,
+    modifier: Modifier = Modifier,
+    title: String = TvContentLoadingCopy.LOADING_ANIME
 ) {
-    Column(
-        modifier = modifier.fillMaxWidth().padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        CircularProgressIndicator(
-            color = TvColors.PrimaryText,
-            strokeWidth = 2.5.dp,
-            modifier = Modifier.size(36.dp)
-        )
-        Spacer(modifier = Modifier.height(12.dp))
-        Text(
-            text = message,
-            style = MaterialTheme.typography.bodyMedium,
-            color = TvColors.SecondaryText
-        )
+    val resolvedTitle = remember(title, message) {
+        when {
+            title != TvContentLoadingCopy.LOADING_ANIME -> title
+            message.contains("search", ignoreCase = true) -> TvContentLoadingCopy.SEARCHING
+            message.contains("episode", ignoreCase = true) -> TvContentLoadingCopy.LOADING_EPISODES
+            message.contains("detail", ignoreCase = true) ||
+                message.contains("watch order", ignoreCase = true) ||
+                message.contains("franchise", ignoreCase = true) -> TvContentLoadingCopy.FETCHING_DETAILS
+            else -> TvContentLoadingCopy.LOADING_ANIME
+        }
     }
+    val resolvedSubtitle = remember(resolvedTitle, message) {
+        if (message.equals(resolvedTitle, ignoreCase = true) || message.equals("Loading...", ignoreCase = true)) {
+            null
+        } else {
+            message
+        }
+    }
+
+    TvContentLoadingScreen(
+        title = resolvedTitle,
+        subtitle = resolvedSubtitle,
+        modifier = modifier.fillMaxWidth().padding(24.dp),
+        fillBackground = false
+    )
 }
 
 @Composable
