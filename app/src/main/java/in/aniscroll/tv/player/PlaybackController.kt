@@ -64,7 +64,9 @@ data class PlaybackUiState(
     val showNextEpisodeCountdown: Boolean = false,
     val nextEpisodeCountdownSec: Int = 8,
     val errorMessage: String? = null,
-    val transientToastMessage: String? = null
+    val transientToastMessage: String? = null,
+    val surfaceRecoveryEpoch: Int = 0,
+    val videoRecoveryCount: Int = 0
 )
 
 class PlaybackController(
@@ -74,6 +76,12 @@ class PlaybackController(
     val preferencesRepository: UserPreferencesRepository,
     private val networkMonitor: NetworkMonitor? = null
 ) : ViewModel() {
+
+    companion object {
+        const val MAX_VIDEO_RECOVERY_ATTEMPTS = 2
+        private const val VIDEO_STALL_AUDIO_ADVANCE_THRESHOLD_MS = 4_000L
+        private const val RECOVERY_COOLDOWN_MS = 5_000L
+    }
 
     val qualityManager = QualityManager()
     val subtitleManager = SubtitleManager()
@@ -90,6 +98,7 @@ class PlaybackController(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppSettings())
 
     private var currentStreamData: StreamData? = null
+    private var currentSelectedSourceUrl: String? = null
     private var sessionJob: Job? = null
     private var episodesLoadJob: Job? = null
     private var aniSkipJob: Job? = null
@@ -110,6 +119,24 @@ class PlaybackController(
 
     @Volatile
     private var hasRenderedFirstFrameForSession: Boolean = false
+
+    @Volatile
+    private var hasCompletedInitialBufferForSession: Boolean = false
+
+    @Volatile
+    private var videoRecoveryAttempts: Int = 0
+
+    @Volatile
+    private var lastVideoRecoveryElapsedMs: Long = 0L
+
+    @Volatile
+    private var lastObservedRenderedFrames: Int = -1
+
+    @Volatile
+    private var lastObservedAudioPosForFrameCheckMs: Long = -1L
+
+    @Volatile
+    private var stalledFrameAudioAdvanceMs: Long = 0L
 
     @Volatile
     private var sessionGeneration: Long = 0L
@@ -138,7 +165,7 @@ class PlaybackController(
                     bufferingStartedElapsedMs = null
                     val stallMs = (nowElapsed - bufferStart).coerceAtLeast(0L)
                     activeMetrics?.let { currentMetrics ->
-                        val isRebuffer = hasRenderedFirstFrameForSession
+                        val isRebuffer = hasCompletedInitialBufferForSession
                         val updated = StreamingDiagnostics.recordBufferingCompleted(
                             session = currentMetrics,
                             stallDurationMs = stallMs,
@@ -155,6 +182,9 @@ class PlaybackController(
                             )
                         }
                     }
+                }
+                if (playbackState == Player.STATE_READY) {
+                    hasCompletedInitialBufferForSession = true
                 }
             }
 
@@ -181,6 +211,29 @@ class PlaybackController(
 
         override fun onTracksChanged(tracks: Tracks) {
             if (!isSessionActive) return
+            val player = exoPlayerManager.peekPlayer()
+            if (player != null) {
+                var hasVideoTrackGroup = false
+                var isAnyVideoTrackSelected = false
+                for (group in tracks.groups) {
+                    if (group.type == androidx.media3.common.C.TRACK_TYPE_VIDEO && group.length > 0) {
+                        hasVideoTrackGroup = true
+                        if (group.isSelected) {
+                            isAnyVideoTrackSelected = true
+                        }
+                    }
+                }
+                if (hasVideoTrackGroup && !isAnyVideoTrackSelected) {
+                    StreamingDiagnostics.logEvent(
+                        "video_track_deselected_detected_on_tracks_changed re_enabling_video_track=true"
+                    )
+                    qualityManager.ensureVideoTrackEnabled(
+                        player = player,
+                        maxHardwareHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
+                    )
+                }
+            }
+
             val stream = currentStreamData ?: return
             val qualities = qualityManager.extractAvailableQualities(
                 sources = stream.sources,
@@ -194,7 +247,7 @@ class PlaybackController(
             if (!isSessionActive) return
             val player = exoPlayerManager.peekPlayer() ?: return
             val stream = currentStreamData
-            val currentPos = player.currentPosition.coerceAtLeast(0L)
+            val currentPos = player.currentPosition.coerceAtLeast(_progressState.value.currentPositionMs).coerceAtLeast(0L)
 
             StreamingDiagnostics.logEvent(
                 "player_error code=${error.errorCodeName} pos_ms=$currentPos retry_count=$streamRetryCount"
@@ -207,12 +260,28 @@ class PlaybackController(
                 return
             }
 
-            // 2. Try fallback quality/source URLs in the current StreamData payload first
+            // 2. If hardware video decoder failed (init or mid-stream decoding error), recover with software decoder fallback
+            val isDecoderError = error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED ||
+                error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
+                error.errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ||
+                error.errorCode == PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED
+            if (isDecoderError && !exoPlayerManager.preferSoftwareDecoderFallback) {
+                if (attemptVideoRenderingRecovery(
+                        reason = "player_decoder_error_${error.errorCodeName}",
+                        forceSoftwareFallback = true
+                    )
+                ) {
+                    return
+                }
+            }
+
+            // 3. Try fallback quality/source URLs in the current StreamData payload first
             if (stream != null && streamRetryCount < stream.sources.size) {
                 streamRetryCount++
                 val nextIndex = streamRetryCount.coerceAtMost(stream.sources.lastIndex)
                 val fallbackSource = stream.sources.getOrNull(nextIndex)
                 if (fallbackSource != null) {
+                    currentSelectedSourceUrl = fallbackSource.url
                     exoPlayerManager.loadStream(
                         streamData = stream,
                         selectedSourceUrl = fallbackSource.url,
@@ -224,7 +293,7 @@ class PlaybackController(
                 }
             }
 
-            // 3. If all sources failed (e.g. expired CDN token), invalidate cache and refresh once from the same provider
+            // 4. If all sources failed (e.g. expired CDN token), invalidate cache and refresh once from the same provider
             val activeAnime = _uiState.value.anime
             if (activeAnime != null && !hasRefreshedStreamOnError) {
                 hasRefreshedStreamOnError = true
@@ -275,6 +344,7 @@ class PlaybackController(
             },
             onFirstFrameRendered = {
                 hasRenderedFirstFrameForSession = true
+                stalledFrameAudioAdvanceMs = 0L
                 activeMetrics?.let { current ->
                     activeMetrics = StreamingDiagnostics.recordFirstFrameRendered(current)
                 }
@@ -282,6 +352,16 @@ class PlaybackController(
             onVideoFormatChanged = { width, height, bitrate ->
                 activeMetrics?.let { current ->
                     activeMetrics = StreamingDiagnostics.recordVideoFormat(current, width, height, bitrate)
+                }
+            },
+            onVideoCodecError = { errorDetail ->
+                if (isSessionActive && !isAppInBackground) {
+                    viewModelScope.launch {
+                        attemptVideoRenderingRecovery(
+                            reason = "codec_error_$errorDetail",
+                            forceSoftwareFallback = true
+                        )
+                    }
                 }
             }
         )
@@ -339,8 +419,17 @@ class PlaybackController(
         hasRefreshedStreamOnError = false
         prewarmedEpisodeNumber = null
         currentStreamData = null
+        currentSelectedSourceUrl = null
         bufferingStartedElapsedMs = SystemClock.elapsedRealtime()
         hasRenderedFirstFrameForSession = false
+        hasCompletedInitialBufferForSession = false
+        videoRecoveryAttempts = 0
+        lastVideoRecoveryElapsedMs = 0L
+        lastObservedRenderedFrames = -1
+        lastObservedAudioPosForFrameCheckMs = -1L
+        stalledFrameAudioAdvanceMs = 0L
+
+        exoPlayerManager.resetDecoderFallbackForNewSession()
 
         val currentTier = networkMonitor?.refreshState() ?: NetworkTier.STANDARD
         activeMetrics = StreamingDiagnostics.startSession(
@@ -552,6 +641,7 @@ class PlaybackController(
 
                 // Start ExoPlayer preparation immediately after receiving the playable URL
                 val shouldAutoPlay = !isAppInBackground && isSessionActive && generation == sessionGeneration
+                currentSelectedSourceUrl = chosenSource.url
                 exoPlayerManager.loadStream(
                     streamData = streamData,
                     selectedSourceUrl = chosenSource.url,
@@ -633,6 +723,7 @@ class PlaybackController(
                     currentStreamData = result.streamData
                     aniSkipManager.setIntervals(result.skipIntervals)
                     val chosenSource = result.streamData.sources.first()
+                    currentSelectedSourceUrl = chosenSource.url
                     _uiState.update {
                         it.copy(
                             isBuffering = false,
@@ -664,6 +755,7 @@ class PlaybackController(
         }
 
         if (option.sourceUrl != null && stream != null) {
+            currentSelectedSourceUrl = option.sourceUrl
             exoPlayerManager.loadStream(
                 streamData = stream,
                 selectedSourceUrl = option.sourceUrl,
@@ -780,6 +872,187 @@ class PlaybackController(
         _uiState.update { it.copy(transientToastMessage = null) }
     }
 
+    /**
+     * Evaluates whether video rendering has stalled or turned black while audio continues playing.
+     * Returns true if a bounded recovery action was triggered.
+     */
+    fun evaluateVideoRenderingHealth(
+        currentAudioPositionMs: Long,
+        isPlaying: Boolean,
+        playbackState: Int,
+        snapshot: VideoRenderingHealthSnapshot? = exoPlayerManager.peekPlayer()?.let {
+            exoPlayerManager.getVideoRenderingHealthSnapshot(it)
+        }
+    ): Boolean {
+        if (!isSessionActive || isAppInBackground || !isPlaying || playbackState != Player.STATE_READY) {
+            lastObservedAudioPosForFrameCheckMs = currentAudioPositionMs
+            if (snapshot != null) {
+                lastObservedRenderedFrames = snapshot.renderedOutputBufferCount
+            }
+            return false
+        }
+        val health = snapshot ?: return false
+
+        // 1. Hardware video codec reported an error while audio continues
+        if (health.lastVideoCodecError != null) {
+            return attemptVideoRenderingRecovery(
+                reason = "health_codec_error_${health.lastVideoCodecError}",
+                forceSoftwareFallback = true
+            )
+        }
+
+        // 2. Video track group exists in stream but was deselected by track constraints
+        if (health.hasVideoTrackGroup && !health.isVideoTrackSelected) {
+            val player = exoPlayerManager.peekPlayer()
+            if (player != null) {
+                qualityManager.ensureVideoTrackEnabled(
+                    player = player,
+                    maxHardwareHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
+                )
+            }
+            return attemptVideoRenderingRecovery(
+                reason = "video_track_deselected_while_audio_playing",
+                forceSoftwareFallback = false
+            )
+        }
+
+        // 3. Check if audio position is advancing normally while rendered video frames are completely frozen
+        val prevAudioPos = lastObservedAudioPosForFrameCheckMs
+        val prevRenderedFrames = lastObservedRenderedFrames
+        lastObservedAudioPosForFrameCheckMs = currentAudioPositionMs
+        lastObservedRenderedFrames = health.renderedOutputBufferCount
+
+        if (hasRenderedFirstFrameForSession && prevAudioPos >= 0L && prevRenderedFrames > 0) {
+            val audioDeltaMs = currentAudioPositionMs - prevAudioPos
+            if (audioDeltaMs in 100L..3_000L) {
+                if (health.renderedOutputBufferCount <= prevRenderedFrames) {
+                    stalledFrameAudioAdvanceMs += audioDeltaMs
+                    if (stalledFrameAudioAdvanceMs >= VIDEO_STALL_AUDIO_ADVANCE_THRESHOLD_MS) {
+                        stalledFrameAudioAdvanceMs = 0L
+                        return attemptVideoRenderingRecovery(
+                            reason = "video_frames_stalled_after_${VIDEO_STALL_AUDIO_ADVANCE_THRESHOLD_MS}ms_audio_advance",
+                            forceSoftwareFallback = videoRecoveryAttempts >= 1
+                        )
+                    }
+                } else {
+                    stalledFrameAudioAdvanceMs = 0L
+                }
+            } else if (audioDeltaMs < 0L || audioDeltaMs > 3_000L) {
+                // User sought or jumped
+                stalledFrameAudioAdvanceMs = 0L
+            }
+        }
+
+        return false
+    }
+
+    /**
+     * Performs a bounded recovery (max [MAX_VIDEO_RECOVERY_ATTEMPTS] per session) when video rendering
+     * fails or stalls while audio continues playing, preserving the current playback position.
+     */
+    fun attemptVideoRenderingRecovery(
+        reason: String,
+        forceSoftwareFallback: Boolean = false
+    ): Boolean {
+        if (!isSessionActive || isAppInBackground) return false
+        if (videoRecoveryAttempts >= MAX_VIDEO_RECOVERY_ATTEMPTS) {
+            StreamingDiagnostics.logEvent(
+                "video_recovery_skipped reason=$reason attempts_exhausted=$videoRecoveryAttempts"
+            )
+            return false
+        }
+
+        val nowElapsed = SystemClock.elapsedRealtime()
+        if (lastVideoRecoveryElapsedMs > 0L &&
+            (nowElapsed - lastVideoRecoveryElapsedMs) < RECOVERY_COOLDOWN_MS &&
+            !forceSoftwareFallback
+        ) {
+            return false
+        }
+
+        videoRecoveryAttempts++
+        lastVideoRecoveryElapsedMs = nowElapsed
+        stalledFrameAudioAdvanceMs = 0L
+        lastObservedRenderedFrames = -1
+
+        val currentPlayer = exoPlayerManager.peekPlayer()
+        val resumePos = (currentPlayer?.currentPosition ?: 0L)
+            .coerceAtLeast(_progressState.value.currentPositionMs)
+            .coerceAtLeast(0L)
+        val stream = currentStreamData
+
+        activeMetrics?.let { current ->
+            activeMetrics = StreamingDiagnostics.recordVideoRecoveryAttempt(
+                session = current,
+                attempt = videoRecoveryAttempts,
+                reason = reason,
+                positionMs = resumePos
+            )
+        } ?: StreamingDiagnostics.logEvent(
+            "video_recovery_attempt attempt=$videoRecoveryAttempts pos_ms=$resumePos reason=$reason"
+        )
+
+        // Attempt 1 (soft recovery): re-enable video track constraints, rebind surface, and re-prepare at current position
+        if (!forceSoftwareFallback && videoRecoveryAttempts == 1 && currentPlayer != null) {
+            qualityManager.ensureVideoTrackEnabled(
+                player = currentPlayer,
+                maxHardwareHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
+            )
+            _uiState.update {
+                it.copy(
+                    surfaceRecoveryEpoch = it.surfaceRecoveryEpoch + 1,
+                    videoRecoveryCount = videoRecoveryAttempts
+                )
+            }
+            currentPlayer.seekTo(resumePos)
+            currentPlayer.prepare()
+            if (!isAppInBackground) {
+                currentPlayer.playWhenReady = true
+                currentPlayer.play()
+            }
+            return true
+        }
+
+        // Attempt 2 (or forced decoder fallback): switch to software decoder fallback and reload stream at resumePos
+        val recreatedPlayer = exoPlayerManager.enableSoftwareDecoderFallbackAndRecreate()
+        exoPlayerManager.setPlayerListener(playerListener)
+
+        _uiState.update {
+            it.copy(
+                surfaceRecoveryEpoch = it.surfaceRecoveryEpoch + 1,
+                videoRecoveryCount = videoRecoveryAttempts
+            )
+        }
+
+        if (stream != null && stream.sources.isNotEmpty()) {
+            // Try an alternate source URL if available (e.g. direct m3u8 vs proxy URL), otherwise reuse current source
+            val activeUrl = currentSelectedSourceUrl ?: stream.sources.first().url
+            val alternateSource = stream.sources.firstOrNull { it.url != activeUrl } ?: stream.sources.first()
+            currentSelectedSourceUrl = alternateSource.url
+
+            exoPlayerManager.loadStream(
+                streamData = stream,
+                selectedSourceUrl = alternateSource.url,
+                startPositionMs = resumePos,
+                playWhenReady = !isAppInBackground,
+                playbackSpeed = _uiState.value.playbackSpeed
+            )
+            qualityManager.ensureVideoTrackEnabled(
+                player = recreatedPlayer,
+                maxHardwareHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
+            )
+            subtitleManager.applyTrackSelection(
+                player = recreatedPlayer,
+                enabled = _uiState.value.subtitlesEnabled,
+                preferredLanguage = _uiState.value.selectedSubtitleLanguage,
+                availableSubtitles = stream.subtitles
+            )
+            return true
+        }
+
+        return false
+    }
+
     private fun maybePrewarmNextEpisode(posMs: Long, durMs: Long, generation: Long) {
         if (durMs <= 0L) return
         val remainingMs = durMs - posMs
@@ -814,6 +1087,12 @@ class PlaybackController(
                     val pos = player.currentPosition.coerceAtLeast(0L)
                     val dur = player.duration.coerceAtLeast(0L)
                     val buf = player.bufferedPosition.coerceAtLeast(0L)
+
+                    evaluateVideoRenderingHealth(
+                        currentAudioPositionMs = pos,
+                        isPlaying = player.isPlaying,
+                        playbackState = player.playbackState
+                    )
 
                     val skipPrompt = aniSkipManager.evaluateCurrentPosition(pos)
                     val settings = appSettings.value

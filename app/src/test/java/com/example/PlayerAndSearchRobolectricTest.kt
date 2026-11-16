@@ -1838,6 +1838,151 @@ class PlayerAndSearchRobolectricTest {
         composeTestRule.onNodeWithText("ANISCROLL TV").assertDoesNotExist()
     }
 
+    @Test
+    fun videoPlayback_preventsBlackScreenWithAudio_keepsTextureViewAttached_andRecoversBoundedly() = runTest {
+        val exoManager = ExoPlayerManager(context)
+        try {
+            val player = exoManager.getOrCreatePlayer()
+            val trackSelector = player.trackSelector as? androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+            assertNotNull("Expected DefaultTrackSelector on ExoPlayer", trackSelector)
+            val params = trackSelector!!.parameters
+            assertTrue("exceedVideoConstraintsIfNecessary must be true so 1080p/Hi10P streams never drop video after first segment", params.exceedVideoConstraintsIfNecessary)
+            assertTrue("exceedRendererCapabilitiesIfNecessary must be true so video renderer is never disabled", params.exceedRendererCapabilitiesIfNecessary)
+            assertFalse("Video track type must never be disabled", player.trackSelectionParameters.disabledTrackTypes.contains(androidx.media3.common.C.TRACK_TYPE_VIDEO))
+
+            // Verify QualityManager Auto mode on CONSTRAINED or STANDARD tier never disables video track
+            exoManager.let { mgr ->
+                val qm = `in`.aniscroll.tv.player.QualityManager()
+                qm.applyQualitySelection(
+                    player = player,
+                    option = `in`.aniscroll.tv.player.AvailableQualityOption("Auto", null),
+                    networkTier = `in`.aniscroll.tv.core.network.NetworkTier.CONSTRAINED,
+                    maxHardwareHeight = mgr.deviceProfile.effectiveMaxPlaybackHeight
+                )
+                assertFalse(player.trackSelectionParameters.disabledTrackTypes.contains(androidx.media3.common.C.TRACK_TYPE_VIDEO))
+                // Auto mode must not cap initial video bitrate to 2.8 Mbps before playback stabilizes
+                assertEquals(Int.MAX_VALUE, player.trackSelectionParameters.maxVideoBitrate)
+            }
+
+            // Inflate R.layout.exo_player_texture_view and verify TextureView videoSurfaceView is created
+            val inflatedView = android.view.LayoutInflater.from(context)
+                .inflate(com.example.R.layout.exo_player_texture_view, null, false) as androidx.media3.ui.PlayerView
+            assertTrue(
+                "Expected TextureView videoSurfaceView for reliable Compose layering and controls auto-hide",
+                inflatedView.videoSurfaceView is android.view.TextureView
+            )
+
+            // Verify PlaybackController detects video track deselection / frozen frames while audio advances and performs bounded recovery
+            val streamPayload = """
+                {
+                  "source": "megaplay",
+                  "anilistId": 16498,
+                  "malId": 16498,
+                  "title": "Attack on Titan",
+                  "episode": 1,
+                  "type": "sub",
+                  "m3u8": "https://cdn.example.com/aot-ep1-direct.m3u8",
+                  "hlsProxyUrl": "https://anivault-scraper-five.vercel.app/api/proxy/hls?url=https%3A%2F%2Fcdn.example.com%2Faot-ep1-direct.m3u8",
+                  "qualities": [
+                    { "quality": "1080p", "url": "https://cdn.example.com/aot-ep1-1080p.m3u8" }
+                  ],
+                  "subtitles": []
+                }
+            """.trimIndent()
+            val fakeAniScroll = FakeAniScrollApi(megaPlayStreamBody = streamPayload)
+            val fakeHoshika = FakeHoshikaApi(
+                detailsJson = """
+                    {
+                      "shortId": 33374,
+                      "titleRomaji": "Shingeki no Kyojin",
+                      "titleEnglish": "Attack on Titan",
+                      "format": "TV",
+                      "mappings": { "anilist": 16498 }
+                    }
+                """.trimIndent()
+            )
+            val animeRepo = createAnimeRepository(fakeHoshika, fakeAniScroll)
+            val playbackRepo = PlaybackRepository(
+                aniScrollApi = fakeAniScroll,
+                aniSkipApi = FakeAniSkipApi(),
+                dao = dao,
+                idConverter = animeRepo.idConverter
+            )
+            val prefs = UserPreferencesRepository(context)
+            val controller = PlaybackController(
+                exoPlayerManager = exoManager,
+                animeRepository = animeRepo,
+                playbackRepository = playbackRepo,
+                preferencesRepository = prefs
+            )
+
+            controller.startPlaybackSession(hoshikaId = 33374L, episodeNumber = 1, requestedLanguage = "sub")
+            composeTestRule.waitUntil(timeoutMillis = 5000) {
+                org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+                !controller.uiState.value.isLoading
+            }
+
+            assertEquals(0, controller.uiState.value.surfaceRecoveryEpoch)
+            assertFalse(exoManager.preferSoftwareDecoderFallback)
+
+            // Simulate Attempt 1: video track deselected while audio is playing at 5,000ms
+            val deselectedSnapshot = `in`.aniscroll.tv.player.VideoRenderingHealthSnapshot(
+                hasVideoTrackGroup = true,
+                isVideoTrackSelected = false,
+                isVideoTrackSupported = true,
+                renderedOutputBufferCount = 120,
+                skippedOutputBufferCount = 0,
+                droppedBufferCount = 0,
+                videoWidth = 1920,
+                videoHeight = 1080,
+                surfaceWidth = 1920,
+                surfaceHeight = 1080,
+                activeDecoderName = "c2.mtk.avc.decoder",
+                lastVideoCodecError = null,
+                isUsingSoftwareDecoderFallback = false
+            )
+            val recovered1 = controller.evaluateVideoRenderingHealth(
+                currentAudioPositionMs = 5_000L,
+                isPlaying = true,
+                playbackState = androidx.media3.common.Player.STATE_READY,
+                snapshot = deselectedSnapshot
+            )
+            assertTrue("Expected Attempt 1 soft surface + track recovery to trigger", recovered1)
+            assertEquals(1, controller.uiState.value.surfaceRecoveryEpoch)
+            assertEquals(1, controller.uiState.value.videoRecoveryCount)
+
+            // Simulate Attempt 2: hardware codec error while audio continues -> must switch to software decoder fallback
+            val codecErrorSnapshot = deselectedSnapshot.copy(
+                isVideoTrackSelected = true,
+                lastVideoCodecError = "MediaCodecVideoDecoderException: Decoder failed"
+            )
+            val recovered2 = controller.evaluateVideoRenderingHealth(
+                currentAudioPositionMs = 9_500L,
+                isPlaying = true,
+                playbackState = androidx.media3.common.Player.STATE_READY,
+                snapshot = codecErrorSnapshot
+            )
+            assertTrue("Expected Attempt 2 software decoder fallback recovery to trigger", recovered2)
+            assertTrue("Expected software decoder fallback mode to be enabled", exoManager.preferSoftwareDecoderFallback)
+            assertEquals(2, controller.uiState.value.surfaceRecoveryEpoch)
+            assertEquals(2, controller.uiState.value.videoRecoveryCount)
+
+            // Attempt 3: must be bounded (MAX_VIDEO_RECOVERY_ATTEMPTS = 2) and never loop infinitely
+            val recovered3 = controller.evaluateVideoRenderingHealth(
+                currentAudioPositionMs = 15_000L,
+                isPlaying = true,
+                playbackState = androidx.media3.common.Player.STATE_READY,
+                snapshot = codecErrorSnapshot
+            )
+            assertFalse("Expected recovery to stop after MAX_VIDEO_RECOVERY_ATTEMPTS (no infinite loop)", recovered3)
+            assertEquals(2, controller.uiState.value.videoRecoveryCount)
+
+            controller.exitAndReleasePlayer()
+        } finally {
+            exoManager.releasePlayer()
+        }
+    }
+
     private fun createAnimeRepository(
         hoshikaApi: HoshikaApi,
         aniScrollApi: AniScrollApi,

@@ -19,15 +19,13 @@ data class AvailableQualityOption(
 
 /**
  * Manages HLS adaptive and specific resolution selection in Media3 ExoPlayer.
- * Supports network-aware initial bitrate/resolution sizing and automatic step-down on repeated rebuffering
- * while preserving manual user quality selection.
+ * Supports hardware-aware resolution sizing and automatic step-down on repeated rebuffering
+ * while guaranteeing that the video track is never disabled when constraints are exceeded.
  */
 @OptIn(UnstableApi::class)
 class QualityManager {
 
     companion object {
-        private const val CONSTRAINED_MAX_VIDEO_HEIGHT = 720
-        private const val CONSTRAINED_MAX_VIDEO_BITRATE = 2_800_000
         private const val REBUFFER_STEPDOWN_HEIGHT = 720
         private const val SEVERE_REBUFFER_STEPDOWN_HEIGHT = 480
     }
@@ -102,19 +100,12 @@ class QualityManager {
         val maxAllowedHeight = maxHardwareHeight.coerceAtLeast(720)
         val maxAllowedWidth = if (maxAllowedHeight >= 2160) 3840 else 1920
         val paramsBuilder = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
 
         if (option.label.equals("Auto", ignoreCase = true) || option.height == null) {
             paramsBuilder.clearOverridesOfType(C.TRACK_TYPE_VIDEO)
-            when (networkTier) {
-                NetworkTier.CONSTRAINED -> {
-                    paramsBuilder.setMaxVideoSize(1280, minOf(CONSTRAINED_MAX_VIDEO_HEIGHT, maxAllowedHeight))
-                    paramsBuilder.setMaxVideoBitrate(CONSTRAINED_MAX_VIDEO_BITRATE)
-                }
-                else -> {
-                    paramsBuilder.setMaxVideoSize(maxAllowedWidth, maxAllowedHeight)
-                    paramsBuilder.setMaxVideoBitrate(Int.MAX_VALUE)
-                }
-            }
+            paramsBuilder.setMaxVideoSize(maxAllowedWidth, maxAllowedHeight)
+            paramsBuilder.setMaxVideoBitrate(Int.MAX_VALUE)
         } else {
             val targetHeight = minOf(option.height, maxAllowedHeight)
             val tracks = player.currentTracks
@@ -142,7 +133,7 @@ class QualityManager {
 
     /**
      * Automatically steps down maximum adaptive resolution when repeated rebuffering occurs in "Auto" mode,
-     * and restores hardware-compatible ABR when network conditions improve.
+     * while preserving video playback if the stream only has a higher-resolution variant.
      */
     fun applyAdaptiveRebufferConstraint(
         player: ExoPlayer,
@@ -156,24 +147,47 @@ class QualityManager {
         val maxAllowedHeight = maxHardwareHeight.coerceAtLeast(720)
         val maxAllowedWidth = if (maxAllowedHeight >= 2160) 3840 else 1920
         val paramsBuilder = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
         paramsBuilder.clearOverridesOfType(C.TRACK_TYPE_VIDEO)
 
         when {
             rebufferCount >= 4 -> {
                 paramsBuilder.setMaxVideoSize(854, SEVERE_REBUFFER_STEPDOWN_HEIGHT)
-                paramsBuilder.setMaxVideoBitrate(1_500_000)
-                StreamingDiagnostics.logEvent("abr_stepdown reason=severe_rebuffering count=$rebufferCount max_height=${SEVERE_REBUFFER_STEPDOWN_HEIGHT}p")
+                paramsBuilder.setMaxVideoBitrate(Int.MAX_VALUE)
+                StreamingDiagnostics.logEvent(
+                    "abr_stepdown reason=severe_rebuffering count=$rebufferCount max_height=${SEVERE_REBUFFER_STEPDOWN_HEIGHT}p"
+                )
             }
-            rebufferCount >= 2 || networkTier == NetworkTier.CONSTRAINED -> {
+            rebufferCount >= 2 -> {
                 paramsBuilder.setMaxVideoSize(1280, minOf(REBUFFER_STEPDOWN_HEIGHT, maxAllowedHeight))
-                paramsBuilder.setMaxVideoBitrate(CONSTRAINED_MAX_VIDEO_BITRATE)
-                StreamingDiagnostics.logEvent("abr_stepdown reason=rebuffering_or_constrained count=$rebufferCount max_height=${REBUFFER_STEPDOWN_HEIGHT}p")
+                paramsBuilder.setMaxVideoBitrate(Int.MAX_VALUE)
+                StreamingDiagnostics.logEvent(
+                    "abr_stepdown reason=rebuffering count=$rebufferCount max_height=${REBUFFER_STEPDOWN_HEIGHT}p"
+                )
             }
             else -> {
                 paramsBuilder.setMaxVideoSize(maxAllowedWidth, maxAllowedHeight)
                 paramsBuilder.setMaxVideoBitrate(Int.MAX_VALUE)
             }
         }
+        player.trackSelectionParameters = paramsBuilder.build()
+    }
+
+    /**
+     * Ensures the video renderer is enabled and clears any restrictive video overrides so a single-variant
+     * or high-profile stream is never left with 0 selected video tracks while audio continues.
+     */
+    fun ensureVideoTrackEnabled(
+        player: ExoPlayer,
+        maxHardwareHeight: Int = 2160
+    ) {
+        val maxAllowedHeight = maxHardwareHeight.coerceAtLeast(720)
+        val maxAllowedWidth = if (maxAllowedHeight >= 2160) 3840 else 1920
+        val paramsBuilder = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
+            .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
+            .setMaxVideoSize(maxAllowedWidth, maxAllowedHeight)
+            .setMaxVideoBitrate(Int.MAX_VALUE)
         player.trackSelectionParameters = paramsBuilder.build()
     }
 }

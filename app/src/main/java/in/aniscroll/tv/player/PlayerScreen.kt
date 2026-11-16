@@ -87,7 +87,7 @@ fun PlayerScreen(
     val surfaceFocusRequester = remember { FocusRequester() }
     val skipButtonFocusRequester = remember { FocusRequester() }
 
-    val exoPlayer = remember(hoshikaId, episodeNumber) {
+    val exoPlayer = remember(hoshikaId, episodeNumber, state.surfaceRecoveryEpoch) {
         controller.exoPlayerManager.getOrCreatePlayer()
     }
 
@@ -235,9 +235,10 @@ fun PlayerScreen(
             }
             .focusable()
     ) {
-        // 1. Stationary Media3 PlayerView Surface
+        // 1. Stationary Media3 PlayerView Surface (TextureView-backed for Compose compatibility)
         PlayerVideoSurface(
             exoPlayer = exoPlayer,
+            surfaceRecoveryEpoch = state.surfaceRecoveryEpoch,
             subtitlePrefs = settings.subtitlePreferences,
             subtitleManager = controller.subtitleManager
         )
@@ -509,18 +510,27 @@ fun PlayerScreen(
 @Composable
 private fun PlayerVideoSurface(
     exoPlayer: ExoPlayer,
+    surfaceRecoveryEpoch: Int,
     subtitlePrefs: SubtitlePreferences,
     subtitleManager: SubtitleManager
 ) {
     var lastAppliedSubtitlePrefs by remember { mutableStateOf<SubtitlePreferences?>(null) }
+    var lastAppliedRecoveryEpoch by remember { mutableStateOf(surfaceRecoveryEpoch) }
 
     AndroidView(
         factory = { ctx ->
-            PlayerView(ctx).apply {
+            val inflated = runCatching {
+                android.view.LayoutInflater.from(ctx)
+                    .inflate(com.example.R.layout.exo_player_texture_view, null, false) as? PlayerView
+            }.getOrNull()
+
+            (inflated ?: PlayerView(ctx)).apply {
                 useController = false
                 resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                player = exoPlayer
+                setKeepContentOnPlayerReset(true)
+                setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                 keepScreenOn = true
+                player = exoPlayer
                 subtitleView?.let { subView ->
                     subtitleManager.applySubtitlePreferencesToView(subView, subtitlePrefs)
                     lastAppliedSubtitlePrefs = subtitlePrefs
@@ -528,8 +538,15 @@ private fun PlayerVideoSurface(
             }
         },
         update = { playerView ->
-            if (playerView.player !== exoPlayer) {
+            if (playerView.player !== exoPlayer || lastAppliedRecoveryEpoch != surfaceRecoveryEpoch) {
+                if (lastAppliedRecoveryEpoch != surfaceRecoveryEpoch) {
+                    StreamingDiagnostics.logEvent(
+                        "video_surface_rebound epoch=$surfaceRecoveryEpoch"
+                    )
+                    playerView.player = null
+                }
                 playerView.player = exoPlayer
+                lastAppliedRecoveryEpoch = surfaceRecoveryEpoch
             }
             if (lastAppliedSubtitlePrefs != subtitlePrefs) {
                 playerView.subtitleView?.let { subView ->

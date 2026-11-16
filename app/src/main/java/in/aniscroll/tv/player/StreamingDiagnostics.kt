@@ -2,6 +2,7 @@ package `in`.aniscroll.tv.player
 
 import android.os.SystemClock
 import android.util.Log
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 
 data class StreamingSessionMetrics(
@@ -21,23 +22,35 @@ data class StreamingSessionMetrics(
     val rebufferCount: Int = 0,
     val selectedResolution: String? = null,
     val selectedBitrateKbps: Int? = null,
+    val videoCodecMimeType: String? = null,
+    val videoCodecProfile: String? = null,
+    val videoFrameRate: Float? = null,
+    val activeDecoderName: String? = null,
+    val droppedFramesTotal: Int = 0,
+    val videoRecoveryAttempts: Int = 0,
+    val lastSurfaceState: String? = null,
+    val lastDecoderError: String? = null,
     val networkTier: String? = null
 )
 
 /**
- * Performance diagnostics logger for the ANISCROLL-TV streaming pipeline.
- * All metrics are emitted under Logcat tag `ANISCROLL_PERFORMANCE`.
+ * Performance and Media3 video-pipeline diagnostics logger for ANISCROLL-TV.
+ * All metrics and diagnostic events are emitted under Logcat tag `ANISCROLL_PERFORMANCE`.
  * Never logs authorization tokens, cookies, API keys, or sensitive headers.
  */
 object StreamingDiagnostics {
 
     const val TAG = "ANISCROLL_PERFORMANCE"
+    private const val MAX_RECENT_EVENTS = 64
 
     private val sessionSequence = AtomicInteger(0)
+    private val recentEventsBuffer = CopyOnWriteArrayList<String>()
 
     @Volatile
     var latestMetrics: StreamingSessionMetrics? = null
         private set
+
+    fun getRecentDiagnosticEvents(): List<String> = recentEventsBuffer.toList()
 
     fun startSession(
         episodeNumber: Int,
@@ -143,17 +156,104 @@ object StreamingDiagnostics {
         session: StreamingSessionMetrics,
         width: Int,
         height: Int,
-        bitrateBps: Int
+        bitrateBps: Int,
+        sampleMimeType: String? = null,
+        codecs: String? = null,
+        frameRate: Float? = null
     ): StreamingSessionMetrics {
         val res = if (width > 0 && height > 0) "${width}x${height}" else session.selectedResolution
         val kbps = if (bitrateBps > 0) bitrateBps / 1000 else session.selectedBitrateKbps
+        val mime = sampleMimeType?.takeIf { it.isNotBlank() } ?: session.videoCodecMimeType
+        val profile = codecs?.takeIf { it.isNotBlank() } ?: session.videoCodecProfile
+        val fps = frameRate?.takeIf { it > 0f } ?: session.videoFrameRate
         val updated = session.copy(
             selectedResolution = res,
-            selectedBitrateKbps = kbps
+            selectedBitrateKbps = kbps,
+            videoCodecMimeType = mime,
+            videoCodecProfile = profile,
+            videoFrameRate = fps
         )
         latestMetrics = updated
         logInfo(
-            "video_format id=${updated.sessionId} resolution=${res ?: "unknown"} bitrate_kbps=${kbps ?: -1}"
+            "video_format id=${updated.sessionId} resolution=${res ?: "unknown"} " +
+                "bitrate_kbps=${kbps ?: -1} mime=${mime ?: "unknown"} codecs=${profile ?: "default"} fps=${fps ?: -1f}"
+        )
+        return updated
+    }
+
+    fun recordDecoderInitialized(
+        session: StreamingSessionMetrics,
+        decoderName: String,
+        initDurationMs: Long
+    ): StreamingSessionMetrics {
+        val updated = session.copy(activeDecoderName = decoderName)
+        latestMetrics = updated
+        logInfo(
+            "video_decoder_init id=${updated.sessionId} decoder=$decoderName init_duration_ms=$initDurationMs"
+        )
+        return updated
+    }
+
+    fun recordDecoderReleased(
+        session: StreamingSessionMetrics,
+        decoderName: String
+    ): StreamingSessionMetrics {
+        logInfo(
+            "video_decoder_released id=${session.sessionId} decoder=$decoderName"
+        )
+        return session
+    }
+
+    fun recordDroppedFrames(
+        session: StreamingSessionMetrics,
+        droppedCount: Int,
+        elapsedMs: Long
+    ): StreamingSessionMetrics {
+        val updated = session.copy(
+            droppedFramesTotal = session.droppedFramesTotal + droppedCount.coerceAtLeast(0)
+        )
+        latestMetrics = updated
+        logInfo(
+            "video_dropped_frames id=${updated.sessionId} dropped=$droppedCount " +
+                "elapsed_ms=$elapsedMs total_dropped=${updated.droppedFramesTotal}"
+        )
+        return updated
+    }
+
+    fun recordDecoderError(
+        session: StreamingSessionMetrics,
+        errorDescription: String
+    ): StreamingSessionMetrics {
+        val updated = session.copy(lastDecoderError = errorDescription)
+        latestMetrics = updated
+        logInfo(
+            "video_codec_error id=${updated.sessionId} detail=$errorDescription"
+        )
+        return updated
+    }
+
+    fun recordSurfaceState(
+        session: StreamingSessionMetrics,
+        stateDescription: String
+    ): StreamingSessionMetrics {
+        val updated = session.copy(lastSurfaceState = stateDescription)
+        latestMetrics = updated
+        logInfo(
+            "video_surface_state id=${updated.sessionId} state=$stateDescription"
+        )
+        return updated
+    }
+
+    fun recordVideoRecoveryAttempt(
+        session: StreamingSessionMetrics,
+        attempt: Int,
+        reason: String,
+        positionMs: Long
+    ): StreamingSessionMetrics {
+        val updated = session.copy(videoRecoveryAttempts = attempt)
+        latestMetrics = updated
+        logInfo(
+            "video_recovery_attempt id=${updated.sessionId} attempt=$attempt pos_ms=$positionMs reason=$reason"
         )
         return updated
     }
@@ -163,6 +263,10 @@ object StreamingDiagnostics {
     }
 
     private fun logInfo(message: String) {
+        if (recentEventsBuffer.size >= MAX_RECENT_EVENTS) {
+            runCatching { recentEventsBuffer.removeAt(0) }
+        }
+        recentEventsBuffer.add(message)
         runCatching { Log.i(TAG, message) }
     }
 }

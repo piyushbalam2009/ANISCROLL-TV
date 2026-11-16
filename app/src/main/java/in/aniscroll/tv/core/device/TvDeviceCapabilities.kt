@@ -337,15 +337,54 @@ object TvDeviceCapabilities {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             return info.isHardwareAccelerated && !info.isSoftwareOnly
         }
-        val name = info.name.lowercase(Locale.ROOT)
-        if (name.startsWith("omx.google.") ||
+        return !isSoftwareCodecName(info.name)
+    }
+
+    fun isSoftwareCodecName(decoderName: String): Boolean {
+        val name = decoderName.lowercase(Locale.ROOT)
+        return name.startsWith("omx.google.") ||
             name.startsWith("c2.android.") ||
             name.contains(".sw.") ||
-            name.contains("ffmpeg")
+            name.contains("ffmpeg") ||
+            name.contains("dav1d")
+    }
+
+    /**
+     * Checks at runtime whether the device's hardware decoder supports the given video format,
+     * codec profile (e.g. detecting 10-bit H.264 Hi10P `avc1.6e` which requires software decoding
+     * on standard Fire TV hardware AVC decoders), and resolution.
+     */
+    fun canHardwareDecodeFormat(
+        profile: TvDeviceProfile,
+        mimeType: String?,
+        width: Int,
+        height: Int,
+        codecs: String? = null
+    ): Boolean {
+        val mime = mimeType?.lowercase(Locale.ROOT) ?: return true
+        val lowerCodecs = codecs?.lowercase(Locale.ROOT).orEmpty()
+
+        // H.264 High 10 Profile (Hi10P: profile_idc 110 = 0x6E, 122 = 0x7A, 244 = 0xF4)
+        // is not supported by standard Fire TV / Android TV hardware AVC decoders.
+        if (mime == MimeTypes.VIDEO_H264.lowercase(Locale.ROOT) &&
+            (lowerCodecs.startsWith("avc1.6e") ||
+                lowerCodecs.startsWith("avc1.7a") ||
+                lowerCodecs.startsWith("avc1.f4"))
         ) {
             return false
         }
-        return true
+
+        val summary = profile.codecSummaries[mimeType]
+        if (summary != null && !summary.hasHardwareDecoder) {
+            return false
+        }
+
+        val checkW = if (width > 0) maxOf(width, height) else 1920
+        val checkH = if (height > 0) minOf(width, height) else 1080
+        val maxW = summary?.maxSupportedWidth ?: profile.maxHardwareVideoWidth
+        val maxH = summary?.maxSupportedHeight ?: profile.maxHardwareVideoHeight
+
+        return checkW <= maxW && checkH <= maxH
     }
 
     /**

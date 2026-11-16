@@ -175,31 +175,32 @@ fun AniScrollTvApp(
         popRoute()
     }
 
-    Crossfade(
-        targetState = launchState.isReadyToNavigate,
-        animationSpec = tween(durationMillis = 360),
-        label = "launch_to_main_crossfade"
-    ) { isReady ->
-        if (!isReady) {
-            AniScrollLaunchScreen(statusText = launchState.statusText)
-        } else {
-            when (activeRoute) {
-                is TvScreenRoute.VideoPlayer -> {
-                    PlayerScreen(
-                        hoshikaId = activeRoute.hoshikaId,
-                        episodeNumber = activeRoute.episodeNumber,
-                        initialLanguage = activeRoute.preferredLanguage,
-                        controller = playbackController,
-                        onExitPlayer = { popRoute() }
-                    )
-                }
-                else -> {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(TvColors.MainBackground)
-                            .windowInsetsPadding(WindowInsets.safeDrawing)
-                    ) {
+    if (launchState.isReadyToNavigate && activeRoute is TvScreenRoute.VideoPlayer) {
+        PlayerScreen(
+            hoshikaId = activeRoute.hoshikaId,
+            episodeNumber = activeRoute.episodeNumber,
+            initialLanguage = activeRoute.preferredLanguage,
+            controller = playbackController,
+            onExitPlayer = { popRoute() }
+        )
+    } else {
+        Crossfade(
+            targetState = launchState.isReadyToNavigate,
+            animationSpec = tween(durationMillis = 360),
+            label = "launch_to_main_crossfade"
+        ) { isReady ->
+            if (!isReady) {
+                AniScrollLaunchScreen(statusText = launchState.statusText)
+            } else {
+                when (activeRoute) {
+                    is TvScreenRoute.VideoPlayer -> Unit
+                    else -> {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(TvColors.MainBackground)
+                                .windowInsetsPadding(WindowInsets.safeDrawing)
+                        ) {
                 TvNavigationSidebar(
                     selectedDestination = currentTab,
                     onSelectDestination = { destination ->
@@ -301,7 +302,8 @@ fun AniScrollTvApp(
                 }
             }
         }
+                }
+            }
         }
     }
-}
 }
