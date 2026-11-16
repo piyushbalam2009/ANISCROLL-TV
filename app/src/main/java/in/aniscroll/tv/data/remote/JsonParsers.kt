@@ -698,7 +698,8 @@ object JsonParsers {
 
     data class AniScrollSearchMatch(
         val anilistId: Long,
-        val format: String?
+        val format: String?,
+        val malId: Long? = null
     )
 
     /**
@@ -728,6 +729,7 @@ object JsonParsers {
 
             var bestId: Long? = null
             var bestFormat: String? = null
+            var bestMalId: Long? = null
             var bestScore = Int.MIN_VALUE
 
             for (i in 0 until results.length()) {
@@ -739,6 +741,10 @@ object JsonParsers {
                 if (candidateId == targetAnime.hoshikaId && targetAnime.hoshikaId > 300_000L) {
                     continue
                 }
+
+                val candidateMalId = item.optLong("malId", 0L).takeIf { it > 0L }
+                    ?: item.optLong("idMal", 0L).takeIf { it > 0L }
+                    ?: item.optLong("mal_id", 0L).takeIf { it > 0L }
 
                 val extracted = extractTitles(item)
                 val candidateTitles = listOfNotNull(extracted.english, extracted.romaji, extracted.native)
@@ -781,10 +787,11 @@ object JsonParsers {
                     bestScore = score
                     bestId = candidateId
                     bestFormat = candidateFormat
+                    bestMalId = candidateMalId
                 }
             }
 
-            bestId?.let { AniScrollSearchMatch(anilistId = it, format = bestFormat) }
+            bestId?.let { AniScrollSearchMatch(anilistId = it, format = bestFormat, malId = bestMalId) }
         }.getOrNull()
     }
 
@@ -1031,9 +1038,18 @@ object JsonParsers {
                 }
             }
 
-            val skipObj = dataObj.optJSONObject("skip") ?: root.optJSONObject("skip")
-            val introObj = dataObj.optJSONObject("intro") ?: skipObj?.optJSONObject("intro")
-            val outroObj = dataObj.optJSONObject("outro") ?: skipObj?.optJSONObject("outro")
+            val malIdFromPayload = dataObj.optLong("malId", 0L).takeIf { it > 0L }
+                ?: dataObj.optLong("mal_id", 0L).takeIf { it > 0L }
+                ?: dataObj.optLong("idMal", 0L).takeIf { it > 0L }
+                ?: root.optLong("malId", 0L).takeIf { it > 0L }
+                ?: root.optLong("mal_id", 0L).takeIf { it > 0L }
+                ?: root.optLong("idMal", 0L).takeIf { it > 0L }
+                ?: embedUrl?.let { url ->
+                    Regex("/stream/mal/(\\d+)/").find(url)?.groupValues?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0L }
+                }
+
+            val parsedEmbeddedSkips = extractEmbeddedSkipsFromJson(dataObj, root)
+            val offsetSec = extractExplicitTimestampOffsetSec(dataObj, root)
 
             val streamTitle = extractTitles(dataObj).let { it.english ?: it.romaji ?: it.native }
                 ?: extractTitles(root).let { it.english ?: it.romaji ?: it.native }
@@ -1045,13 +1061,205 @@ object JsonParsers {
                 sources = sources,
                 subtitles = subtitles,
                 headers = headers,
-                introStartSec = introObj?.optDouble("start")?.takeIf { !it.isNaN() }?.toFloat(),
-                introEndSec = introObj?.optDouble("end")?.takeIf { !it.isNaN() && it > 0 }?.toFloat(),
-                outroStartSec = outroObj?.optDouble("start")?.takeIf { !it.isNaN() }?.toFloat(),
-                outroEndSec = outroObj?.optDouble("end")?.takeIf { !it.isNaN() && it > 0 }?.toFloat(),
+                introStartSec = parsedEmbeddedSkips.intro?.startTimeSec,
+                introEndSec = parsedEmbeddedSkips.intro?.endTimeSec,
+                outroStartSec = parsedEmbeddedSkips.outro?.startTimeSec,
+                outroEndSec = parsedEmbeddedSkips.outro?.endTimeSec,
+                recapStartSec = parsedEmbeddedSkips.recap?.startTimeSec,
+                recapEndSec = parsedEmbeddedSkips.recap?.endTimeSec,
+                timestampOffsetSec = offsetSec,
+                malId = malIdFromPayload,
                 title = streamTitle
             )
         }.getOrNull()
+    }
+
+    private fun extractExplicitTimestampOffsetSec(dataObj: JSONObject, root: JSONObject): Float {
+        val keys = arrayOf("timestampOffset", "timestamp_offset", "skipOffset", "skip_offset")
+        for (source in listOf(dataObj, root)) {
+            for (key in keys) {
+                if (source.has(key) && !source.isNull(key)) {
+                    val v = source.optDouble(key, Double.NaN)
+                    if (!v.isNaN() && kotlin.math.abs(v) <= 120.0) {
+                        return v.toFloat()
+                    }
+                }
+            }
+        }
+        return 0f
+    }
+
+    private fun parseRangeCandidate(raw: Any?, skipId: String = ""): TimeRange? {
+        when (raw) {
+            is JSONObject -> {
+                val intervalObj = raw.optJSONObject("interval") ?: raw
+                val startMs = intervalObj.optDouble("startTimeMs", Double.NaN).takeIf { !it.isNaN() }
+                    ?: intervalObj.optDouble("start_ms", Double.NaN).takeIf { !it.isNaN() }
+                val endMs = intervalObj.optDouble("endTimeMs", Double.NaN).takeIf { !it.isNaN() }
+                    ?: intervalObj.optDouble("end_ms", Double.NaN).takeIf { !it.isNaN() }
+                if (startMs != null && endMs != null) {
+                    val s = (startMs / 1000.0).toFloat()
+                    val e = (endMs / 1000.0).toFloat()
+                    if (s >= 0f && e > s && (e - s) >= 2f) {
+                        return TimeRange(startTimeSec = s, endTimeSec = e, skipId = skipId)
+                    }
+                }
+
+                val startSec = intervalObj.optDouble("start", Double.NaN).takeIf { !it.isNaN() }
+                    ?: intervalObj.optDouble("startTime", Double.NaN).takeIf { !it.isNaN() }
+                    ?: intervalObj.optDouble("start_time", Double.NaN).takeIf { !it.isNaN() }
+                    ?: intervalObj.optDouble("from", Double.NaN).takeIf { !it.isNaN() }
+                    ?: intervalObj.optDouble("begin", Double.NaN).takeIf { !it.isNaN() }
+                val endSec = intervalObj.optDouble("end", Double.NaN).takeIf { !it.isNaN() }
+                    ?: intervalObj.optDouble("endTime", Double.NaN).takeIf { !it.isNaN() }
+                    ?: intervalObj.optDouble("end_time", Double.NaN).takeIf { !it.isNaN() }
+                    ?: intervalObj.optDouble("to", Double.NaN).takeIf { !it.isNaN() }
+                if (startSec != null && endSec != null) {
+                    val s = startSec.toFloat()
+                    val e = endSec.toFloat()
+                    if (s >= 0f && e > s && (e - s) >= 2f) {
+                        return TimeRange(startTimeSec = s, endTimeSec = e, skipId = skipId)
+                    }
+                }
+            }
+            is JSONArray -> {
+                if (raw.length() >= 2) {
+                    val s = raw.optDouble(0, Double.NaN).toFloat()
+                    val e = raw.optDouble(1, Double.NaN).toFloat()
+                    if (!s.isNaN() && !e.isNaN() && s >= 0f && e > s && (e - s) >= 2f) {
+                        return TimeRange(startTimeSec = s, endTimeSec = e, skipId = skipId)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun extractEmbeddedSkipsFromJson(dataObj: JSONObject, root: JSONObject): SkipIntervals {
+        var introRange: TimeRange? = null
+        var outroRange: TimeRange? = null
+        var recapRange: TimeRange? = null
+
+        val skipContainers = listOfNotNull(
+            dataObj.optJSONObject("skip"),
+            root.optJSONObject("skip"),
+            dataObj.optJSONObject("skips"),
+            root.optJSONObject("skips"),
+            dataObj.optJSONObject("skipTimes"),
+            root.optJSONObject("skipTimes"),
+            dataObj,
+            root
+        )
+
+        val introKeys = listOf("intro", "op", "opening", "mixed-op", "mixed_op")
+        val outroKeys = listOf("outro", "ed", "ending", "mixed-ed", "mixed_ed")
+        val recapKeys = listOf("recap", "summary")
+
+        for (container in skipContainers) {
+            if (introRange == null) {
+                for (key in introKeys) {
+                    if (container.has(key) && !container.isNull(key)) {
+                        introRange = parseRangeCandidate(container.opt(key), "embedded_intro")
+                        if (introRange != null) break
+                    }
+                }
+            }
+            if (outroRange == null) {
+                for (key in outroKeys) {
+                    if (container.has(key) && !container.isNull(key)) {
+                        outroRange = parseRangeCandidate(container.opt(key), "embedded_outro")
+                        if (outroRange != null) break
+                    }
+                }
+            }
+            if (recapRange == null) {
+                for (key in recapKeys) {
+                    if (container.has(key) && !container.isNull(key)) {
+                        recapRange = parseRangeCandidate(container.opt(key), "embedded_recap")
+                        if (recapRange != null) break
+                    }
+                }
+            }
+        }
+
+        // Also check flat numeric fields if present
+        for (source in listOf(dataObj, root)) {
+            if (introRange == null) {
+                val s = source.optDouble("introStart", Double.NaN).takeIf { !it.isNaN() }
+                    ?: source.optDouble("intro_start", Double.NaN).takeIf { !it.isNaN() }
+                val e = source.optDouble("introEnd", Double.NaN).takeIf { !it.isNaN() }
+                    ?: source.optDouble("intro_end", Double.NaN).takeIf { !it.isNaN() }
+                if (s != null && e != null && s >= 0.0 && e > s && (e - s) >= 2.0) {
+                    introRange = TimeRange(s.toFloat(), e.toFloat(), "embedded_intro_flat")
+                }
+            }
+            if (outroRange == null) {
+                val s = source.optDouble("outroStart", Double.NaN).takeIf { !it.isNaN() }
+                    ?: source.optDouble("outro_start", Double.NaN).takeIf { !it.isNaN() }
+                val e = source.optDouble("outroEnd", Double.NaN).takeIf { !it.isNaN() }
+                    ?: source.optDouble("outro_end", Double.NaN).takeIf { !it.isNaN() }
+                if (s != null && e != null && s >= 0.0 && e > s && (e - s) >= 2.0) {
+                    outroRange = TimeRange(s.toFloat(), e.toFloat(), "embedded_outro_flat")
+                }
+            }
+            if (recapRange == null) {
+                val s = source.optDouble("recapStart", Double.NaN).takeIf { !it.isNaN() }
+                    ?: source.optDouble("recap_start", Double.NaN).takeIf { !it.isNaN() }
+                val e = source.optDouble("recapEnd", Double.NaN).takeIf { !it.isNaN() }
+                    ?: source.optDouble("recap_end", Double.NaN).takeIf { !it.isNaN() }
+                if (s != null && e != null && s >= 0.0 && e > s && (e - s) >= 2.0) {
+                    recapRange = TimeRange(s.toFloat(), e.toFloat(), "embedded_recap_flat")
+                }
+            }
+        }
+
+        // Also check array-based skip/chapters lists if present
+        val arrayCandidates = listOfNotNull(
+            dataObj.optJSONArray("skip"),
+            root.optJSONArray("skip"),
+            dataObj.optJSONArray("skips"),
+            root.optJSONArray("skips"),
+            dataObj.optJSONArray("skipTimes"),
+            root.optJSONArray("skipTimes"),
+            dataObj.optJSONArray("chapters"),
+            root.optJSONArray("chapters"),
+            dataObj.optJSONArray("segments"),
+            root.optJSONArray("segments")
+        )
+        for (arr in arrayCandidates) {
+            for (i in 0 until arr.length()) {
+                val item = arr.optJSONObject(i) ?: continue
+                val rawType = (item.optString("type").takeNonNull()
+                    ?: item.optString("skipType").takeNonNull()
+                    ?: item.optString("kind").takeNonNull()
+                    ?: item.optString("name").takeNonNull()
+                    ?: item.optString("title").takeNonNull()
+                    ?: "").lowercase(Locale.ROOT).trim()
+                val range = parseRangeCandidate(item, "embedded_$rawType") ?: continue
+                when {
+                    rawType in introKeys || rawType.contains("intro") || rawType.contains("opening") -> {
+                        if (introRange == null) introRange = range
+                    }
+                    rawType in outroKeys || rawType.contains("outro") || rawType.contains("ending") -> {
+                        if (outroRange == null) outroRange = range
+                    }
+                    rawType in recapKeys || rawType.contains("recap") -> {
+                        if (recapRange == null) recapRange = range
+                    }
+                    rawType.isNotEmpty() -> {
+                        `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                            "skip_parser_unsupported_embedded_segment type=$rawType start=${range.startTimeSec} end=${range.endTimeSec}"
+                        )
+                    }
+                }
+            }
+        }
+
+        return SkipIntervals(
+            intro = introRange,
+            outro = outroRange,
+            recap = recapRange
+        )
     }
 
     private fun normalizeQualityLabel(raw: String): String {
@@ -1068,31 +1276,60 @@ object JsonParsers {
 
     fun parseAniSkipResponse(rawBody: String): SkipIntervals {
         return runCatching {
-            val root = JSONObject(rawBody.trim())
-            if (!root.optBoolean("found", false)) {
-                return SkipIntervals()
+            val trimmed = rawBody.trim()
+            if (trimmed.isEmpty()) return SkipIntervals()
+
+            val results: JSONArray = when {
+                trimmed.startsWith("[") -> JSONArray(trimmed)
+                trimmed.startsWith("{") -> {
+                    val root = JSONObject(trimmed)
+                    if (root.has("found") && !root.optBoolean("found", false)) {
+                        return SkipIntervals()
+                    }
+                    root.optJSONArray("results")
+                        ?: root.optJSONArray("data")
+                        ?: root.optJSONObject("data")?.optJSONArray("results")
+                        ?: return extractEmbeddedSkipsFromJson(root, root)
+                }
+                else -> return SkipIntervals()
             }
-            val results = root.optJSONArray("results") ?: return SkipIntervals()
+
             var introRange: TimeRange? = null
             var outroRange: TimeRange? = null
+            var recapRange: TimeRange? = null
 
             for (i in 0 until results.length()) {
                 val item = results.optJSONObject(i) ?: continue
-                val skipType = item.optString("skipType").lowercase()
-                val interval = item.optJSONObject("interval") ?: continue
-                val start = interval.optDouble("startTime", -1.0).toFloat()
-                val end = interval.optDouble("endTime", -1.0).toFloat()
+                val skipType = (item.optString("skipType").takeNonNull()
+                    ?: item.optString("type").takeNonNull()
+                    ?: "").lowercase(Locale.ROOT).trim()
                 val skipId = item.optString("skipId", "")
+                val range = parseRangeCandidate(item, skipId) ?: continue
 
-                if (start >= 0f && end > start) {
-                    val range = TimeRange(startTimeSec = start, endTimeSec = end, skipId = skipId)
-                    when (skipType) {
-                        "op", "mixed-op" -> if (introRange == null) introRange = range
-                        "ed", "mixed-ed" -> if (outroRange == null) outroRange = range
+                when (skipType) {
+                    "op", "mixed-op", "mixed_op", "intro", "opening" -> {
+                        if (introRange == null) introRange = range
+                    }
+                    "ed", "mixed-ed", "mixed_ed", "outro", "ending" -> {
+                        if (outroRange == null) outroRange = range
+                    }
+                    "recap", "summary" -> {
+                        if (recapRange == null) recapRange = range
+                    }
+                    else -> {
+                        if (skipType.isNotEmpty()) {
+                            `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                                "aniskip_unsupported_segment_type type=$skipType start=${range.startTimeSec} end=${range.endTimeSec}"
+                            )
+                        }
                     }
                 }
             }
-            SkipIntervals(intro = introRange, outro = outroRange)
+            SkipIntervals(
+                intro = introRange,
+                outro = outroRange,
+                recap = recapRange
+            )
         }.getOrDefault(SkipIntervals())
     }
 

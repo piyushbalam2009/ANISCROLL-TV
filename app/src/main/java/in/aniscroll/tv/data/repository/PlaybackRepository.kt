@@ -209,13 +209,13 @@ class PlaybackRepository(
                 )
             }
 
-            val streamData = JsonParsers.parseAniScrollStreamResponse(
+            val rawStreamData = JsonParsers.parseAniScrollStreamResponse(
                 anilistId = anilistId,
                 episodeNumber = targetEpisode,
                 language = normalizedLang,
                 rawBody = rawBody
             )
-            if (streamData == null) {
+            if (rawStreamData == null) {
                 deferred.complete(null)
                 return@withContext StreamLoadResult.Error(
                     userMessage = if (normalizedLang == "dub") {
@@ -225,6 +225,15 @@ class PlaybackRepository(
                     },
                     provider = provider
                 )
+            }
+
+            val resolvedMalId = rawStreamData.malId
+                ?: resolvedTarget.malId
+                ?: anime.malId?.takeIf { it > 0L }
+            val streamData = if (rawStreamData.malId == null && resolvedMalId != null) {
+                rawStreamData.copy(malId = resolvedMalId)
+            } else {
+                rawStreamData
             }
 
             shortLivedStreamCache[cacheKey] = CachedStreamEntry(
@@ -262,53 +271,175 @@ class PlaybackRepository(
         }
     }
 
+    private val skipIntervalsCache = ConcurrentHashMap<String, SkipIntervals>()
+
     fun extractEmbeddedSkipIntervals(streamData: StreamData): SkipIntervals {
-        val fallbackIntro = if (streamData.introStartSec != null && streamData.introEndSec != null &&
-            streamData.introEndSec > streamData.introStartSec
-        ) {
-            TimeRange(startTimeSec = streamData.introStartSec, endTimeSec = streamData.introEndSec)
-        } else null
+        val offset = streamData.timestampOffsetSec
 
-        val fallbackOutro = if (streamData.outroStartSec != null && streamData.outroEndSec != null &&
-            streamData.outroEndSec > streamData.outroStartSec
-        ) {
-            TimeRange(startTimeSec = streamData.outroStartSec, endTimeSec = streamData.outroEndSec)
-        } else null
+        fun buildValidRange(startSec: Float?, endSec: Float?, tag: String): TimeRange? {
+            if (startSec == null || endSec == null || startSec.isNaN() || endSec.isNaN()) return null
+            val adjustedStart = (startSec + offset).coerceAtLeast(0f)
+            val adjustedEnd = endSec + offset
+            if (adjustedEnd <= adjustedStart || (adjustedEnd - adjustedStart) < 2f) {
+                `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                    "skip_embedded_invalid_ignored type=$tag start=$startSec end=$endSec offset=$offset"
+                )
+                return null
+            }
+            return TimeRange(
+                startTimeSec = adjustedStart,
+                endTimeSec = adjustedEnd,
+                skipId = tag
+            )
+        }
 
-        return SkipIntervals(intro = fallbackIntro, outro = fallbackOutro)
+        val fallbackIntro = buildValidRange(streamData.introStartSec, streamData.introEndSec, "embedded_intro")
+        val fallbackOutro = buildValidRange(streamData.outroStartSec, streamData.outroEndSec, "embedded_outro")
+        val fallbackRecap = buildValidRange(streamData.recapStartSec, streamData.recapEndSec, "embedded_recap")
+
+        `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+            "skip_embedded_extracted anilist_id=${streamData.anilistId} mal_id=${streamData.malId ?: -1} ep=${streamData.episodeNumber} " +
+                "intro=${fallbackIntro?.let { "${it.startTimeSec}..${it.endTimeSec}s" } ?: "none"} " +
+                "outro=${fallbackOutro?.let { "${it.startTimeSec}..${it.endTimeSec}s" } ?: "none"} " +
+                "recap=${fallbackRecap?.let { "${it.startTimeSec}..${it.endTimeSec}s" } ?: "none"}"
+        )
+
+        return SkipIntervals(
+            intro = fallbackIntro,
+            outro = fallbackOutro,
+            recap = fallbackRecap,
+            anilistId = streamData.anilistId,
+            malId = streamData.malId,
+            episodeNumber = streamData.episodeNumber
+        )
     }
 
     /**
      * Non-blocking AniSkip v2 interval lookup.
-     * If the stream payload already contains both intro and outro intervals, skips the network call.
+     * Queries AniSkip v2 (`https://api.aniskip.com/v2/skip-times/{malId}/{episodeNumber}`) using
+     * the resolved MyAnimeList ID (`malId`) first (with `anilistId` fallback if needed),
+     * merges with embedded stream skip intervals, and caches the result per episode.
      */
     suspend fun fetchAniSkipIntervals(
         anilistId: Long,
         episodeNumber: Int,
-        streamData: StreamData
+        streamData: StreamData,
+        malId: Long? = streamData.malId,
+        episodeDurationSec: Float = 0f
     ): SkipIntervals = withContext(Dispatchers.IO) {
+        val normalizedEp = episodeNumber.coerceAtLeast(1)
+        val effectiveMalId = (malId ?: streamData.malId)?.takeIf { it > 0L }
+        val cacheKey = "$anilistId:${effectiveMalId ?: 0L}:$normalizedEp"
+
         val embedded = extractEmbeddedSkipIntervals(streamData)
-        if (embedded.intro != null && embedded.outro != null) {
+        skipIntervalsCache[cacheKey]?.let { cached ->
+            val mergedCached = SkipIntervals(
+                intro = cached.intro ?: embedded.intro,
+                outro = cached.outro ?: embedded.outro,
+                recap = cached.recap ?: embedded.recap,
+                anilistId = anilistId,
+                malId = effectiveMalId,
+                episodeNumber = normalizedEp
+            )
+            `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                "aniskip_cache_hit anilist_id=$anilistId mal_id=${effectiveMalId ?: -1} ep=$normalizedEp " +
+                    "intro=${mergedCached.intro != null} outro=${mergedCached.outro != null} recap=${mergedCached.recap != null}"
+            )
+            return@withContext mergedCached
+        }
+
+        // If embedded payload already provides intro, outro, and recap, no external request needed
+        if (embedded.intro != null && embedded.outro != null && embedded.recap != null) {
+            skipIntervalsCache[cacheKey] = embedded
             return@withContext embedded
         }
 
-        val apiResp = runCatching {
-            aniSkipApi.getSkipTimes(animeId = anilistId, episodeNumber = episodeNumber)
-        }.getOrNull()
+        // AniSkip v2 is indexed by MyAnimeList ID (malId). Try effectiveMalId first, then anilistId fallback.
+        val candidateIds = listOfNotNull(
+            effectiveMalId,
+            anilistId.takeIf { it > 0L }
+        ).distinct()
 
-        if (apiResp != null && apiResp.isSuccessful) {
-            val raw = apiResp.body()?.string()
-            if (!raw.isNullOrBlank()) {
-                val parsed = JsonParsers.parseAniSkipResponse(raw)
-                if (parsed.intro != null || parsed.outro != null) {
-                    return@withContext SkipIntervals(
-                        intro = parsed.intro ?: embedded.intro,
-                        outro = parsed.outro ?: embedded.outro
+        val requestedTypes = listOf("op", "ed", "mixed-op", "mixed-ed", "recap")
+        val sanitizedLength = if (episodeDurationSec > 30f && !episodeDurationSec.isNaN()) episodeDurationSec else 0f
+
+        for (candidateId in candidateIds) {
+            `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                "aniskip_request id=$candidateId (mal_id=${effectiveMalId ?: -1}, anilist_id=$anilistId) " +
+                    "ep=$normalizedEp types=${requestedTypes.joinToString(",")} ep_len=$sanitizedLength"
+            )
+            val apiResp = runCatching {
+                aniSkipApi.getSkipTimes(
+                    animeId = candidateId,
+                    episodeNumber = normalizedEp,
+                    types = requestedTypes,
+                    episodeLength = sanitizedLength
+                )
+            }.onFailure { err ->
+                `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                    "aniskip_request_error id=$candidateId ep=$normalizedEp error=${err.javaClass.simpleName}:${err.message ?: "none"}"
+                )
+            }.getOrNull()
+
+            if (apiResp != null) {
+                val statusCode = apiResp.code()
+                if (apiResp.isSuccessful) {
+                    val raw = apiResp.body()?.string()
+                    if (!raw.isNullOrBlank()) {
+                        val parsed = JsonParsers.parseAniSkipResponse(raw)
+                        val offset = streamData.timestampOffsetSec
+                        fun applyOffsetIfAny(range: TimeRange?): TimeRange? {
+                            if (range == null) return null
+                            if (offset == 0f) return range
+                            val s = (range.startTimeSec + offset).coerceAtLeast(0f)
+                            val e = range.endTimeSec + offset
+                            return if (e > s + 2f) range.copy(startTimeSec = s, endTimeSec = e) else null
+                        }
+
+                        val apiIntro = applyOffsetIfAny(parsed.intro)
+                        val apiOutro = applyOffsetIfAny(parsed.outro)
+                        val apiRecap = applyOffsetIfAny(parsed.recap)
+
+                        if (apiIntro != null || apiOutro != null || apiRecap != null) {
+                            val merged = SkipIntervals(
+                                intro = embedded.intro ?: apiIntro,
+                                outro = embedded.outro ?: apiOutro,
+                                recap = embedded.recap ?: apiRecap,
+                                anilistId = anilistId,
+                                malId = effectiveMalId,
+                                episodeNumber = normalizedEp
+                            )
+                            `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                                "aniskip_response_parsed id=$candidateId status=$statusCode ep=$normalizedEp " +
+                                    "intro=${merged.intro?.let { "${it.startTimeSec}..${it.endTimeSec}s" } ?: "none"} " +
+                                    "outro=${merged.outro?.let { "${it.startTimeSec}..${it.endTimeSec}s" } ?: "none"} " +
+                                    "recap=${merged.recap?.let { "${it.startTimeSec}..${it.endTimeSec}s" } ?: "none"}"
+                            )
+                            skipIntervalsCache[cacheKey] = merged
+                            return@withContext merged
+                        } else {
+                            `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                                "aniskip_response_empty id=$candidateId status=$statusCode ep=$normalizedEp"
+                            )
+                        }
+                    }
+                } else {
+                    `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                        "aniskip_response_http_status id=$candidateId status=$statusCode ep=$normalizedEp"
                     )
                 }
             }
         }
 
+        if (embedded.recap == null) {
+            `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                "skip_recap_unavailable anilist_id=$anilistId mal_id=${effectiveMalId ?: -1} ep=$normalizedEp " +
+                    "reason=no_recap_timestamps_in_stream_or_aniskip"
+            )
+        }
+        if (embedded.hasAnyInterval) {
+            skipIntervalsCache[cacheKey] = embedded
+        }
         embedded
     }
 

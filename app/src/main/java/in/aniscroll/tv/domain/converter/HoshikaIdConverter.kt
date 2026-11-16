@@ -8,7 +8,8 @@ import `in`.aniscroll.tv.domain.model.Anime
 
 data class ResolvedStreamingTarget(
     val anilistId: Long,
-    val format: String?
+    val format: String?,
+    val malId: Long? = null
 )
 
 /**
@@ -58,10 +59,16 @@ class HoshikaIdConverter(
         if (hoshikaId <= 0L) return null
 
         val incomingFormat = anime.format?.trim()?.takeIf { it.isNotEmpty() }
+        val incomingMalId = anime.malId?.takeIf { it > 0L }
         memoryTargetCache[hoshikaId]?.let { mem ->
             if (!mem.format.isNullOrBlank() || incomingFormat != null) {
-                val merged = if (mem.format.isNullOrBlank() && incomingFormat != null) {
-                    mem.copy(format = incomingFormat).also { memoryTargetCache[hoshikaId] = it }
+                val merged = if ((mem.format.isNullOrBlank() && incomingFormat != null) ||
+                    (mem.malId == null && incomingMalId != null)
+                ) {
+                    mem.copy(
+                        format = mem.format?.takeIf { it.isNotBlank() } ?: incomingFormat,
+                        malId = mem.malId ?: incomingMalId
+                    ).also { memoryTargetCache[hoshikaId] = it }
                 } else {
                     mem
                 }
@@ -71,14 +78,23 @@ class HoshikaIdConverter(
 
         var resolvedFormat: String? = incomingFormat
             ?: dao.getCachedAnime(hoshikaId)?.format?.trim()?.takeIf { it.isNotEmpty() }
+        var resolvedMalId: Long? = incomingMalId
 
         // 1. Check Room cache first
         val cached = dao.getMapping(hoshikaId)
         if (cached != null && cached.anilistId > 0L) {
             if (resolvedFormat == null) {
-                resolvedFormat = fetchHoshikaAnimeDetails(hoshikaId)?.format?.trim()?.takeIf { it.isNotEmpty() }
+                val fetched = fetchHoshikaAnimeDetails(hoshikaId)
+                resolvedFormat = fetched?.format?.trim()?.takeIf { it.isNotEmpty() }
+                if (resolvedMalId == null) {
+                    resolvedMalId = fetched?.malId?.takeIf { it > 0L }
+                }
             }
-            return ResolvedStreamingTarget(anilistId = cached.anilistId, format = resolvedFormat).also {
+            return ResolvedStreamingTarget(
+                anilistId = cached.anilistId,
+                format = resolvedFormat,
+                malId = resolvedMalId
+            ).also {
                 memoryTargetCache[hoshikaId] = it
             }
         }
@@ -88,9 +104,17 @@ class HoshikaIdConverter(
         if (directAnilist != null) {
             saveMapping(hoshikaId, directAnilist)
             if (resolvedFormat == null) {
-                resolvedFormat = fetchHoshikaAnimeDetails(hoshikaId)?.format?.trim()?.takeIf { it.isNotEmpty() }
+                val fetched = fetchHoshikaAnimeDetails(hoshikaId)
+                resolvedFormat = fetched?.format?.trim()?.takeIf { it.isNotEmpty() }
+                if (resolvedMalId == null) {
+                    resolvedMalId = fetched?.malId?.takeIf { it > 0L }
+                }
             }
-            return ResolvedStreamingTarget(anilistId = directAnilist, format = resolvedFormat).also {
+            return ResolvedStreamingTarget(
+                anilistId = directAnilist,
+                format = resolvedFormat,
+                malId = resolvedMalId
+            ).also {
                 memoryTargetCache[hoshikaId] = it
             }
         }
@@ -109,10 +133,17 @@ class HoshikaIdConverter(
         if (resolvedFormat == null) {
             resolvedFormat = detailedAnime.format?.trim()?.takeIf { it.isNotEmpty() }
         }
+        if (resolvedMalId == null) {
+            resolvedMalId = detailedAnime.malId?.takeIf { it > 0L }
+        }
 
         detailedAnime.anilistId?.takeIf { it > 0L && it != hoshikaId }?.let { resolved ->
             saveMapping(hoshikaId, resolved)
-            return ResolvedStreamingTarget(anilistId = resolved, format = resolvedFormat).also {
+            return ResolvedStreamingTarget(
+                anilistId = resolved,
+                format = resolvedFormat,
+                malId = resolvedMalId
+            ).also {
                 memoryTargetCache[hoshikaId] = it
             }
         }
@@ -122,7 +153,11 @@ class HoshikaIdConverter(
             val fromMal = resolveFromMalId(malId)
             if (fromMal != null && fromMal > 0L) {
                 saveMapping(hoshikaId, fromMal)
-                return ResolvedStreamingTarget(anilistId = fromMal, format = resolvedFormat).also {
+                return ResolvedStreamingTarget(
+                    anilistId = fromMal,
+                    format = resolvedFormat,
+                    malId = malId
+                ).also {
                     memoryTargetCache[hoshikaId] = it
                 }
             }
@@ -141,7 +176,8 @@ class HoshikaIdConverter(
                 saveMapping(hoshikaId, match.anilistId)
                 return ResolvedStreamingTarget(
                     anilistId = match.anilistId,
-                    format = resolvedFormat ?: match.format
+                    format = resolvedFormat ?: match.format,
+                    malId = resolvedMalId ?: match.malId
                 ).also {
                     memoryTargetCache[hoshikaId] = it
                 }

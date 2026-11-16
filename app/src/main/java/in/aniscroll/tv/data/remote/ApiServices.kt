@@ -250,7 +250,7 @@ interface AniSkipApi {
     suspend fun getSkipTimes(
         @Path("animeId") animeId: Long,
         @Path("episodeNumber") episodeNumber: Int,
-        @Query("types") types: List<String> = listOf("op", "ed", "mixed-op", "mixed-ed"),
+        @Query("types") types: List<String> = listOf("op", "ed", "mixed-op", "mixed-ed", "recap"),
         @Query("episodeLength") episodeLength: Float = 0f
     ): Response<ResponseBody>
 }

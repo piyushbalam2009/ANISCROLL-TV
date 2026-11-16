@@ -41,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -85,6 +86,7 @@ fun PlayerScreen(
     var isSeeking by remember { mutableStateOf(false) }
 
     val surfaceFocusRequester = remember { FocusRequester() }
+    val playPauseFocusRequester = remember { FocusRequester() }
     val skipButtonFocusRequester = remember { FocusRequester() }
 
     val exoPlayer = remember(hoshikaId, episodeNumber, state.surfaceRecoveryEpoch) {
@@ -123,10 +125,20 @@ fun PlayerScreen(
         }
     }
 
-    // Keep root focusable surface focused when controls hide so remote presses wake controls predictably
-    LaunchedEffect(controlsVisible, state.activeSkipPrompt) {
-        if (!controlsVisible && state.activeSkipPrompt == null) {
-            runCatching { surfaceFocusRequester.requestFocus() }
+    // Keep focus deterministic when skip prompt appears/disappears or controls hide
+    LaunchedEffect(controlsVisible, state.activeSkipPrompt, activeSettingsPanel) {
+        if (state.activeSkipPrompt == null) {
+            if (lastFocusTarget == PlayerFocusTarget.SKIP_PROMPT) {
+                lastFocusTarget = PlayerFocusTarget.PLAY_PAUSE
+                if (controlsVisible && activeSettingsPanel == PlayerSettingsPanel.NONE) {
+                    runCatching { playPauseFocusRequester.requestFocus() }
+                }
+            }
+            if (!controlsVisible) {
+                runCatching { surfaceFocusRequester.requestFocus() }
+            }
+        } else if (!controlsVisible && activeSettingsPanel == PlayerSettingsPanel.NONE && state.errorMessage == null) {
+            runCatching { skipButtonFocusRequester.requestFocus() }
         }
     }
 
@@ -156,6 +168,10 @@ fun PlayerScreen(
     val recordActivity: () -> Unit = remember {
         { lastUserInteractionMs = System.currentTimeMillis() }
     }
+
+    val isSkipPromptVisible = state.activeSkipPrompt != null &&
+        state.errorMessage == null &&
+        activeSettingsPanel == PlayerSettingsPanel.NONE
 
     Box(
         modifier = modifier
@@ -219,7 +235,6 @@ fun PlayerScreen(
                             KeyEvent.KEYCODE_DPAD_RIGHT
                         )
                     ) {
-                        // Allow AniSkip button activation if skip button currently holds focus on ENTER/CENTER
                         val isCenterKey = keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
                             keyCode == KeyEvent.KEYCODE_ENTER ||
                             keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER ||
@@ -227,8 +242,31 @@ fun PlayerScreen(
                         if (isCenterKey && state.activeSkipPrompt != null) {
                             return@onPreviewKeyEvent false
                         }
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && state.activeSkipPrompt != null) {
+                            runCatching { skipButtonFocusRequester.requestFocus() }
+                            return@onPreviewKeyEvent true
+                        }
+                        if (lastFocusTarget == PlayerFocusTarget.SKIP_PROMPT) {
+                            lastFocusTarget = PlayerFocusTarget.PLAY_PAUSE
+                        }
                         controlsVisible = true
                         return@onPreviewKeyEvent true
+                    }
+                }
+                false
+            }
+            .onKeyEvent { event ->
+                if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN && !controlsVisible) {
+                    val keyCode = event.nativeKeyEvent.keyCode
+                    val isCenterKey = keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                        keyCode == KeyEvent.KEYCODE_ENTER ||
+                        keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER ||
+                        keyCode == KeyEvent.KEYCODE_BUTTON_A
+                    val prompt = state.activeSkipPrompt
+                    if (isCenterKey && prompt != null && state.errorMessage == null) {
+                        recordActivity()
+                        controller.performSkip(prompt)
+                        return@onKeyEvent true
                     }
                 }
                 false
@@ -330,9 +368,68 @@ fun PlayerScreen(
             }
         }
 
-        // 5. Minimal White-Theme Skip Intro / Skip Outro Pill Button
+        // 5. Minimalist Circular Controls Overlay
         AnimatedVisibility(
-            visible = state.activeSkipPrompt != null && state.errorMessage == null && activeSettingsPanel == PlayerSettingsPanel.NONE,
+            visible = controlsVisible && state.errorMessage == null,
+            enter = fadeIn(tween(150)),
+            exit = fadeOut(tween(150)),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            PlayerControlsOverlay(
+                animeTitle = state.anime?.preferredTitle?.takeIf { it.isNotBlank() }
+                    ?: state.currentEpisodeTitle?.takeIf { it.isNotBlank() }
+                    ?: "Episode ${state.currentEpisodeNumber}",
+                episodeNumber = state.currentEpisodeNumber,
+                episodeTitle = state.currentEpisodeTitle,
+                audioLanguage = state.audioLanguage,
+                selectedQualityLabel = state.selectedQualityLabel,
+                playbackSpeed = state.playbackSpeed,
+                isPlaying = state.isPlaying,
+                hasPreviousEpisode = state.previousEpisode != null,
+                hasNextEpisode = state.nextEpisode != null,
+                progressStateFlow = controller.progressState,
+                activePanel = activeSettingsPanel,
+                canInteract = controlsVisible && state.errorMessage == null,
+                lastFocusTarget = lastFocusTarget,
+                isMovie = `in`.aniscroll.tv.data.repository.StreamingSourceResolver.isMovie(state.anime?.format),
+                playPauseFocusRequester = playPauseFocusRequester,
+                skipButtonFocusRequester = if (isSkipPromptVisible) skipButtonFocusRequester else null,
+                onSeekingChanged = { seeking ->
+                    isSeeking = seeking
+                    if (seeking) recordActivity()
+                },
+                onFocusTargetChanged = { lastFocusTarget = it },
+                onUserActivity = recordActivity,
+                onBackClick = {
+                    controller.exitAndReleasePlayer()
+                    onExitPlayer()
+                },
+                onPreviousEpisode = { controller.playPreviousEpisode() },
+                onSeekRelative = { delta -> controller.seekRelative(delta) },
+                onTogglePlayPause = { controller.togglePlayPause() },
+                onNextEpisode = { controller.playNextEpisodeNow() },
+                onToggleAudioLanguage = {
+                    lastFocusTarget = PlayerFocusTarget.AUDIO
+                    activeSettingsPanel = PlayerSettingsPanel.AUDIO
+                },
+                onOpenSubtitlesPanel = {
+                    lastFocusTarget = PlayerFocusTarget.SUBTITLES
+                    activeSettingsPanel = PlayerSettingsPanel.SUBTITLES
+                },
+                onOpenSpeedPanel = {
+                    lastFocusTarget = PlayerFocusTarget.SPEED
+                    activeSettingsPanel = PlayerSettingsPanel.SPEED
+                },
+                onOpenQualityPanel = {
+                    lastFocusTarget = PlayerFocusTarget.QUALITY
+                    activeSettingsPanel = PlayerSettingsPanel.QUALITY
+                }
+            )
+        }
+
+        // 6. Minimal White-Theme Skip Intro / Skip Recap / Skip Outro Pill Button (rendered above controls overlay)
+        AnimatedVisibility(
+            visible = isSkipPromptVisible,
             enter = fadeIn(tween(150)),
             exit = fadeOut(tween(150)),
             modifier = Modifier
@@ -341,14 +438,28 @@ fun PlayerScreen(
         ) {
             state.activeSkipPrompt?.let { prompt ->
                 LaunchedEffect(prompt.type, controlsVisible) {
-                    if (!controlsVisible) {
+                    if (!controlsVisible && activeSettingsPanel == PlayerSettingsPanel.NONE) {
                         runCatching { skipButtonFocusRequester.requestFocus() }
                     }
                 }
                 SkipIntroOutroButton(
                     prompt = prompt,
+                    enabled = isSkipPromptVisible,
                     focusRequester = skipButtonFocusRequester,
-                    onFocused = recordActivity,
+                    controlsFocusRequester = if (controlsVisible) playPauseFocusRequester else null,
+                    onNavigateToControls = if (!controlsVisible) {
+                        {
+                            lastFocusTarget = PlayerFocusTarget.PLAY_PAUSE
+                            recordActivity()
+                            controlsVisible = true
+                        }
+                    } else {
+                        null
+                    },
+                    onFocused = {
+                        lastFocusTarget = PlayerFocusTarget.SKIP_PROMPT
+                        recordActivity()
+                    },
                     onClick = {
                         recordActivity()
                         controller.performSkip(prompt)
@@ -357,7 +468,7 @@ fun PlayerScreen(
             }
         }
 
-        // 6. Auto Next Episode Countdown Overlay
+        // 7. Auto Next Episode Countdown Overlay (rendered above controls overlay)
         AnimatedVisibility(
             visible = state.showNextEpisodeCountdown && state.nextEpisode != null && activeSettingsPanel == PlayerSettingsPanel.NONE,
             enter = fadeIn(tween(150)),
@@ -404,63 +515,6 @@ fun PlayerScreen(
                     }
                 }
             }
-        }
-
-        // 7. Minimalist Circular Controls Overlay
-        AnimatedVisibility(
-            visible = controlsVisible && state.errorMessage == null,
-            enter = fadeIn(tween(150)),
-            exit = fadeOut(tween(150)),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            PlayerControlsOverlay(
-                animeTitle = state.anime?.preferredTitle?.takeIf { it.isNotBlank() }
-                    ?: state.currentEpisodeTitle?.takeIf { it.isNotBlank() }
-                    ?: "Episode ${state.currentEpisodeNumber}",
-                episodeNumber = state.currentEpisodeNumber,
-                episodeTitle = state.currentEpisodeTitle,
-                audioLanguage = state.audioLanguage,
-                selectedQualityLabel = state.selectedQualityLabel,
-                playbackSpeed = state.playbackSpeed,
-                isPlaying = state.isPlaying,
-                hasPreviousEpisode = state.previousEpisode != null,
-                hasNextEpisode = state.nextEpisode != null,
-                progressStateFlow = controller.progressState,
-                activePanel = activeSettingsPanel,
-                canInteract = controlsVisible && state.errorMessage == null,
-                lastFocusTarget = lastFocusTarget,
-                isMovie = `in`.aniscroll.tv.data.repository.StreamingSourceResolver.isMovie(state.anime?.format),
-                onSeekingChanged = { seeking ->
-                    isSeeking = seeking
-                    if (seeking) recordActivity()
-                },
-                onFocusTargetChanged = { lastFocusTarget = it },
-                onUserActivity = recordActivity,
-                onBackClick = {
-                    controller.exitAndReleasePlayer()
-                    onExitPlayer()
-                },
-                onPreviousEpisode = { controller.playPreviousEpisode() },
-                onSeekRelative = { delta -> controller.seekRelative(delta) },
-                onTogglePlayPause = { controller.togglePlayPause() },
-                onNextEpisode = { controller.playNextEpisodeNow() },
-                onToggleAudioLanguage = {
-                    lastFocusTarget = PlayerFocusTarget.AUDIO
-                    activeSettingsPanel = PlayerSettingsPanel.AUDIO
-                },
-                onOpenSubtitlesPanel = {
-                    lastFocusTarget = PlayerFocusTarget.SUBTITLES
-                    activeSettingsPanel = PlayerSettingsPanel.SUBTITLES
-                },
-                onOpenSpeedPanel = {
-                    lastFocusTarget = PlayerFocusTarget.SPEED
-                    activeSettingsPanel = PlayerSettingsPanel.SPEED
-                },
-                onOpenQualityPanel = {
-                    lastFocusTarget = PlayerFocusTarget.QUALITY
-                    activeSettingsPanel = PlayerSettingsPanel.QUALITY
-                }
-            )
         }
 
         // 8. Compact Subtitle & Audio Track Selection Menus

@@ -85,7 +85,7 @@ class PlaybackController(
 
     val qualityManager = QualityManager()
     val subtitleManager = SubtitleManager()
-    private val aniSkipManager = AniSkipManager()
+    val aniSkipManager = AniSkipManager()
     private val nextEpisodeManager = NextEpisodeManager()
 
     private val _uiState = MutableStateFlow(PlaybackUiState())
@@ -429,6 +429,8 @@ class PlaybackController(
         lastObservedAudioPosForFrameCheckMs = -1L
         stalledFrameAudioAdvanceMs = 0L
 
+        // Immediately clear previous episode skip intervals so stale buttons never appear during loading
+        aniSkipManager.resetForEpisode(episodeNumber.coerceAtLeast(1))
         exoPlayerManager.resetDecoderFallbackForNewSession()
 
         val currentTier = networkMonitor?.refreshState() ?: NetworkTier.STANDARD
@@ -585,7 +587,9 @@ class PlaybackController(
 
                 val streamData = result.streamData
                 currentStreamData = streamData
-                aniSkipManager.setIntervals(result.skipIntervals)
+                if (result.skipIntervals.hasAnyInterval || !aniSkipManager.getIntervals().hasAnyInterval) {
+                    aniSkipManager.setIntervals(result.skipIntervals)
+                }
 
                 activeMetrics?.let { current ->
                     val afterRes = StreamingDiagnostics.recordServerResolution(
@@ -677,10 +681,18 @@ class PlaybackController(
                     val enrichedIntervals = playbackRepository.fetchAniSkipIntervals(
                         anilistId = streamData.anilistId,
                         episodeNumber = episodeNumber,
-                        streamData = streamData
+                        streamData = streamData,
+                        malId = streamData.malId ?: updatedAnime.malId
                     )
                     if (!isSessionActive || generation != sessionGeneration) return@launch
                     aniSkipManager.setIntervals(enrichedIntervals)
+                    val activePlayer = exoPlayerManager.peekPlayer()
+                    val currentPos = activePlayer?.currentPosition?.coerceAtLeast(0L) ?: startPos
+                    val currentDur = activePlayer?.duration?.coerceAtLeast(0L) ?: 0L
+                    val evaluatedPrompt = aniSkipManager.evaluateCurrentPosition(currentPos, currentDur)
+                    if (_uiState.value.activeSkipPrompt != evaluatedPrompt) {
+                        _uiState.update { it.copy(activeSkipPrompt = evaluatedPrompt) }
+                    }
                 }
 
                 startProgressPolling(generation)
@@ -720,25 +732,37 @@ class PlaybackController(
                     }
                 }
                 is StreamLoadResult.Success -> {
-                    currentStreamData = result.streamData
+                    val newStream = result.streamData
+                    currentStreamData = newStream
                     aniSkipManager.setIntervals(result.skipIntervals)
-                    val chosenSource = result.streamData.sources.first()
+                    val chosenSource = newStream.sources.first()
                     currentSelectedSourceUrl = chosenSource.url
                     _uiState.update {
                         it.copy(
                             isBuffering = false,
                             audioLanguage = normalized,
-                            availableSubtitles = result.streamData.subtitles,
+                            availableSubtitles = newStream.subtitles,
                             transientToastMessage = "Audio: ${normalized.uppercase()}"
                         )
                     }
                     exoPlayerManager.loadStream(
-                        streamData = result.streamData,
+                        streamData = newStream,
                         selectedSourceUrl = chosenSource.url,
                         startPositionMs = savedPosition,
                         playWhenReady = !isAppInBackground,
                         playbackSpeed = _uiState.value.playbackSpeed
                     )
+                    aniSkipJob?.cancel()
+                    aniSkipJob = viewModelScope.launch {
+                        val enriched = playbackRepository.fetchAniSkipIntervals(
+                            anilistId = newStream.anilistId,
+                            episodeNumber = current.currentEpisodeNumber,
+                            streamData = newStream,
+                            malId = newStream.malId ?: anime.malId
+                        )
+                        if (!isSessionActive || generation != sessionGeneration) return@launch
+                        aniSkipManager.setIntervals(enriched)
+                    }
                 }
             }
         }
@@ -824,19 +848,44 @@ class PlaybackController(
         val duration = player.duration.coerceAtLeast(0L)
         val target = (player.currentPosition + deltaMs)
             .coerceIn(0L, if (duration > 0L) duration else Long.MAX_VALUE)
-        player.seekTo(target)
+        if (deltaMs < 0L) {
+            aniSkipManager.onManualUserSeek(target)
+        }
+        runCatching { player.seekTo(target) }
         _progressState.update { it.copy(currentPositionMs = target) }
         _uiState.update {
-            it.copy(activeSkipPrompt = aniSkipManager.evaluateCurrentPosition(target))
+            it.copy(activeSkipPrompt = aniSkipManager.evaluateCurrentPosition(target, duration))
         }
     }
 
     fun performSkip(prompt: ActiveSkipPrompt) {
-        val player = exoPlayerManager.peekPlayer() ?: return
         aniSkipManager.markSkipped(prompt)
-        player.seekTo(prompt.targetTimeMs)
-        _progressState.update { it.copy(currentPositionMs = prompt.targetTimeMs) }
         _uiState.update { it.copy(activeSkipPrompt = null) }
+
+        val player = exoPlayerManager.peekPlayer() ?: return
+        val currentPos = player.currentPosition.coerceAtLeast(0L)
+        val duration = player.duration.coerceAtLeast(0L)
+        val safeTargetMs = if (duration > 0L) {
+            prompt.targetTimeMs.coerceIn(0L, (duration - 250L).coerceAtLeast(0L))
+        } else {
+            prompt.targetTimeMs.coerceAtLeast(0L)
+        }
+
+        val seekSucceeded = runCatching {
+            player.seekTo(safeTargetMs)
+        }.onFailure { err ->
+            StreamingDiagnostics.logEvent(
+                "skip_seek_error type=${prompt.type} target_ms=$safeTargetMs error=${err.javaClass.simpleName}:${err.message ?: "none"}"
+            )
+        }.isSuccess
+
+        if (seekSucceeded) {
+            _progressState.update { it.copy(currentPositionMs = safeTargetMs) }
+            StreamingDiagnostics.logEvent(
+                "skip_seek_executed type=${prompt.type} from_ms=$currentPos target_ms=$safeTargetMs " +
+                    "duration_ms=$duration play_when_ready=${player.playWhenReady}"
+            )
+        }
     }
 
     fun playNextEpisodeNow() {
@@ -1094,7 +1143,7 @@ class PlaybackController(
                         playbackState = player.playbackState
                     )
 
-                    val skipPrompt = aniSkipManager.evaluateCurrentPosition(pos)
+                    val skipPrompt = aniSkipManager.evaluateCurrentPosition(pos, dur)
                     val settings = appSettings.value
 
                     if (skipPrompt != null &&
@@ -1229,6 +1278,7 @@ class PlaybackController(
         persistCurrentProgress()
         currentStreamData = null
         bufferingStartedElapsedMs = null
+        aniSkipManager.resetForEpisode(null)
         exoPlayerManager.releasePlayer()
 
         _progressState.value = PlaybackProgressState()

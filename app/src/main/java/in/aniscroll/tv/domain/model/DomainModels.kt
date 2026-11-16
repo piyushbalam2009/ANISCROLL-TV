@@ -111,6 +111,10 @@ data class StreamData(
     val introEndSec: Float? = null,
     val outroStartSec: Float? = null,
     val outroEndSec: Float? = null,
+    val recapStartSec: Float? = null,
+    val recapEndSec: Float? = null,
+    val timestampOffsetSec: Float = 0f,
+    val malId: Long? = null,
     val title: String? = null
 )
 
@@ -118,12 +122,28 @@ data class TimeRange(
     val startTimeSec: Float,
     val endTimeSec: Float,
     val skipId: String = ""
-)
+) {
+    val startTimeMs: Long
+        get() = kotlin.math.round(startTimeSec.toDouble() * 1000.0).toLong().coerceAtLeast(0L)
+
+    val endTimeMs: Long
+        get() = kotlin.math.round(endTimeSec.toDouble() * 1000.0).toLong().coerceAtLeast(0L)
+
+    val durationSec: Float
+        get() = endTimeSec - startTimeSec
+}
 
 data class SkipIntervals(
     val intro: TimeRange? = null,
-    val outro: TimeRange? = null
-)
+    val outro: TimeRange? = null,
+    val recap: TimeRange? = null,
+    val anilistId: Long? = null,
+    val malId: Long? = null,
+    val episodeNumber: Int? = null
+) {
+    val hasAnyInterval: Boolean
+        get() = intro != null || outro != null || recap != null
+}
 
 enum class SubtitleSize(val label: String, val fontSizeSp: Float) {
     SMALL("Small", 16f),

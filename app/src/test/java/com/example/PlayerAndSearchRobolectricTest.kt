@@ -1983,6 +1983,272 @@ class PlayerAndSearchRobolectricTest {
         }
     }
 
+    @Test
+    fun skipButtons_parsesIntroOutroRecap_mapsMalIdForAniSkip_resetsAcrossEpisodes_andRendersAndSeeksInPlayer() = runTest {
+        // 1. Verify AniSkip v2 response parsing for op, ed, and recap with decimal seconds + invalid range filtering
+        val aniSkipJson = """
+            {
+              "found": true,
+              "results": [
+                {
+                  "interval": { "startTime": 10.0, "endTime": 45.5 },
+                  "skipType": "recap",
+                  "skipId": "recap-1",
+                  "episodeLength": 1440.0
+                },
+                {
+                  "interval": { "startTime": 85.25, "endTime": 175.25 },
+                  "skipType": "op",
+                  "skipId": "op-1",
+                  "episodeLength": 1440.0
+                },
+                {
+                  "interval": { "startTime": 1320.0, "endTime": 1410.0 },
+                  "skipType": "ed",
+                  "skipId": "ed-1",
+                  "episodeLength": 1440.0
+                },
+                {
+                  "interval": { "startTime": 0.0, "endTime": 0.0 },
+                  "skipType": "op",
+                  "skipId": "invalid-zero"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val parsedAniSkip = `in`.aniscroll.tv.data.remote.JsonParsers.parseAniSkipResponse(aniSkipJson)
+        assertNotNull(parsedAniSkip.recap)
+        assertEquals(10_000L, parsedAniSkip.recap!!.startTimeMs)
+        assertEquals(45_500L, parsedAniSkip.recap!!.endTimeMs)
+        assertNotNull(parsedAniSkip.intro)
+        assertEquals(85_250L, parsedAniSkip.intro!!.startTimeMs)
+        assertEquals(175_250L, parsedAniSkip.intro!!.endTimeMs)
+        assertNotNull(parsedAniSkip.outro)
+        assertEquals(1_320_000L, parsedAniSkip.outro!!.startTimeMs)
+        assertEquals(1_410_000L, parsedAniSkip.outro!!.endTimeMs)
+
+        // 2. Verify embedded stream response parsing (malId extraction, 0..0 placeholder rejection, recap/intro/outro extraction)
+        val embeddedStreamJson = """
+            {
+              "source": "megaplay",
+              "anilistId": 154587,
+              "malId": 52991,
+              "title": "Frieren: Beyond Journey's End",
+              "episode": 1,
+              "type": "sub",
+              "m3u8": "https://cdn.example.com/frieren-ep1.m3u8",
+              "hlsProxyUrl": "https://anivault-scraper-five.vercel.app/api/proxy/hls?url=https%3A%2F%2Fcdn.example.com%2Ffrieren-ep1.m3u8",
+              "intro": { "start": 0, "end": 0 },
+              "outro": { "start": 1320.5, "end": 1410.5 },
+              "recap": { "start": 12.0, "end": 42.0 },
+              "qualities": [],
+              "subtitles": []
+            }
+        """.trimIndent()
+
+        val parsedStream = `in`.aniscroll.tv.data.remote.JsonParsers.parseAniScrollStreamResponse(
+            anilistId = 154587L,
+            episodeNumber = 1,
+            language = "sub",
+            rawBody = embeddedStreamJson
+        )
+        assertNotNull(parsedStream)
+        assertEquals(52991L, parsedStream!!.malId)
+        assertNull("0..0 placeholder intro must be ignored", parsedStream.introStartSec)
+        assertEquals(1320.5f, parsedStream.outroStartSec!!, 0.01f)
+        assertEquals(1410.5f, parsedStream.outroEndSec!!, 0.01f)
+        assertEquals(12.0f, parsedStream.recapStartSec!!, 0.01f)
+        assertEquals(42.0f, parsedStream.recapEndSec!!, 0.01f)
+
+        // 3. Verify PlaybackRepository queries AniSkip using MAL ID (52991) first instead of only AniList ID (154587)
+        val requestedAniSkipIds = mutableListOf<Pair<Long, Int>>()
+        val requestedAniSkipTypes = mutableListOf<List<String>>()
+        val fakeAniSkip = object : AniSkipApi {
+            override suspend fun getSkipTimes(
+                animeId: Long,
+                episodeNumber: Int,
+                types: List<String>,
+                episodeLength: Float
+            ): Response<ResponseBody> {
+                requestedAniSkipIds.add(animeId to episodeNumber)
+                requestedAniSkipTypes.add(types)
+                return if (animeId == 52991L && episodeNumber == 1) {
+                    Response.success(aniSkipJson.toResponseBody("application/json".toMediaType()))
+                } else {
+                    Response.error(404, """{"found":false,"results":[]}""".toResponseBody("application/json".toMediaType()))
+                }
+            }
+        }
+
+        val ep1OnlyEmbeddedRecapNoIntroJson = """
+            {
+              "source": "megaplay",
+              "anilistId": 154587,
+              "malId": 52991,
+              "title": "Frieren: Beyond Journey's End",
+              "episode": 1,
+              "type": "sub",
+              "m3u8": "https://cdn.example.com/frieren-ep1.m3u8",
+              "hlsProxyUrl": "https://anivault-scraper-five.vercel.app/api/proxy/hls?url=https%3A%2F%2Fcdn.example.com%2Ffrieren-ep1.m3u8",
+              "qualities": [],
+              "subtitles": []
+            }
+        """.trimIndent()
+
+        val fakeAniScroll = object : AniScrollApi by FakeAniScrollApi() {
+            override suspend fun getWatchStreams(
+                source: String,
+                anilistId: Long,
+                episode: Int,
+                language: String
+            ): Response<ResponseBody> = getMegaPlayStreams(anilistId, episode, language)
+
+            override suspend fun getMegaPlayStreams(anilistId: Long, episode: Int, language: String): Response<ResponseBody> {
+                val payload = if (episode == 1) {
+                    ep1OnlyEmbeddedRecapNoIntroJson
+                } else {
+                    """
+                    {
+                      "source": "megaplay",
+                      "anilistId": 154587,
+                      "malId": 52991,
+                      "title": "Frieren: Beyond Journey's End",
+                      "episode": $episode,
+                      "type": "sub",
+                      "m3u8": "https://cdn.example.com/frieren-ep$episode.m3u8",
+                      "hlsProxyUrl": "https://anivault-scraper-five.vercel.app/api/proxy/hls?url=https%3A%2F%2Fcdn.example.com%2Ffrieren-ep$episode.m3u8",
+                      "qualities": [],
+                      "subtitles": []
+                    }
+                    """.trimIndent()
+                }
+                return Response.success(payload.toResponseBody("application/json".toMediaType()))
+            }
+        }
+
+        val fakeHoshika = FakeHoshikaApi(
+            detailsJson = """
+                {
+                  "shortId": 91001,
+                  "anilistId": 154587,
+                  "malId": 52991,
+                  "titleRomaji": "Sousou no Frieren",
+                  "titleEnglish": "Frieren: Beyond Journey's End",
+                  "format": "TV",
+                  "episodes": 28
+                }
+            """.trimIndent()
+        )
+
+        val animeRepo = createAnimeRepository(fakeHoshika, fakeAniScroll)
+        val playbackRepo = PlaybackRepository(
+            aniScrollApi = fakeAniScroll,
+            aniSkipApi = fakeAniSkip,
+            dao = dao,
+            idConverter = animeRepo.idConverter
+        )
+        val exoManager = ExoPlayerManager(context)
+        val prefs = UserPreferencesRepository(context)
+        val controller = PlaybackController(
+            exoPlayerManager = exoManager,
+            animeRepository = animeRepo,
+            playbackRepository = playbackRepo,
+            preferencesRepository = prefs
+        )
+
+        try {
+            controller.startPlaybackSession(hoshikaId = 91001L, episodeNumber = 1, requestedLanguage = "sub")
+            composeTestRule.waitUntil(timeoutMillis = 5000) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                !controller.uiState.value.isLoading && controller.aniSkipManager.getIntervals().hasAnyInterval
+            }
+            assertFalse(controller.uiState.value.isLoading)
+            assertTrue(controller.aniSkipManager.getIntervals().hasAnyInterval)
+
+            // Confirm AniSkip was queried with MAL ID 52991 first and included "recap" in types
+            assertEquals(52991L to 1, requestedAniSkipIds.first())
+            assertTrue(requestedAniSkipTypes.first().containsAll(listOf("op", "ed", "mixed-op", "mixed-ed", "recap")))
+
+            // 4. Verify position-based visibility transitions:
+            // Before recap (5s) -> no button
+            assertNull(controller.aniSkipManager.evaluateCurrentPosition(5_000L, 1_440_000L))
+            // Inside recap (20s) -> Skip Recap
+            val recapPrompt = controller.aniSkipManager.evaluateCurrentPosition(20_000L, 1_440_000L)
+            assertNotNull(recapPrompt)
+            assertEquals(`in`.aniscroll.tv.player.ActiveSkipType.RECAP, recapPrompt!!.type)
+            assertEquals("Skip Recap", recapPrompt.label)
+            assertEquals(45_500L, recapPrompt.targetTimeMs)
+
+            // Between recap and intro (60s) -> no button
+            assertNull(controller.aniSkipManager.evaluateCurrentPosition(60_000L, 1_440_000L))
+
+            // Inside intro (90s) -> Skip Intro
+            val introPrompt = controller.aniSkipManager.evaluateCurrentPosition(90_000L, 1_440_000L)
+            assertNotNull(introPrompt)
+            assertEquals(`in`.aniscroll.tv.player.ActiveSkipType.INTRO, introPrompt!!.type)
+            assertEquals("Skip Intro", introPrompt.label)
+            assertEquals(175_250L, introPrompt.targetTimeMs)
+
+            // Perform Skip Intro -> seeks player to 175,250ms, hides button immediately, prevents re-triggering
+            controller.performSkip(introPrompt)
+            assertNull(controller.uiState.value.activeSkipPrompt)
+            assertNull(
+                "Skip Intro must not re-appear while still inside intro after being activated",
+                controller.aniSkipManager.evaluateCurrentPosition(100_000L, 1_440_000L)
+            )
+            assertEquals(175_250L, controller.progressState.value.currentPositionMs)
+
+            // Manual backward user seek before intro start re-enables Skip Intro
+            controller.aniSkipManager.onManualUserSeek(80_000L)
+            assertNotNull(controller.aniSkipManager.evaluateCurrentPosition(95_000L, 1_440_000L))
+
+            // Inside outro (1350s) -> Skip Outro
+            val outroPrompt = controller.aniSkipManager.evaluateCurrentPosition(1_350_000L, 1_440_000L)
+            assertNotNull(outroPrompt)
+            assertEquals(`in`.aniscroll.tv.player.ActiveSkipType.OUTRO, outroPrompt!!.type)
+            assertEquals("Skip Outro", outroPrompt.label)
+            assertEquals(1_410_000L, outroPrompt.targetTimeMs)
+
+            // 5. Switching to Episode 2 (which has no skip segments) immediately resets stale Episode 1 segments
+            controller.startPlaybackSession(hoshikaId = 91001L, episodeNumber = 2, requestedLanguage = "sub")
+            composeTestRule.waitUntil(timeoutMillis = 5000) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                !controller.uiState.value.isLoading && controller.uiState.value.currentEpisodeNumber == 2
+            }
+            assertFalse(controller.aniSkipManager.getIntervals().hasAnyInterval)
+            assertNull(controller.uiState.value.activeSkipPrompt)
+            assertNull(controller.aniSkipManager.evaluateCurrentPosition(90_000L, 1_440_000L))
+
+            // 6. Verify Compose UI rendering & click activation for Skip Recap, Skip Intro, and Skip Outro
+            val activePromptState = androidx.compose.runtime.mutableStateOf(recapPrompt)
+            var clickedPromptType: `in`.aniscroll.tv.player.ActiveSkipType? = null
+            composeTestRule.setContent {
+                `in`.aniscroll.tv.player.SkipIntroOutroButton(
+                    prompt = activePromptState.value,
+                    onClick = { clickedPromptType = activePromptState.value.type }
+                )
+            }
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("player_aniskip_button").assertIsDisplayed()
+            composeTestRule.onNodeWithText("Skip Recap").assertIsDisplayed()
+            composeTestRule.onNodeWithTag("player_aniskip_button").performClick()
+            assertEquals(`in`.aniscroll.tv.player.ActiveSkipType.RECAP, clickedPromptType)
+
+            activePromptState.value = introPrompt
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithText("Skip Intro").assertIsDisplayed()
+
+            activePromptState.value = outroPrompt
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithText("Skip Outro").assertIsDisplayed()
+
+            controller.exitAndReleasePlayer()
+        } finally {
+            exoManager.releasePlayer()
+        }
+    }
+
     private fun createAnimeRepository(
         hoshikaApi: HoshikaApi,
         aniScrollApi: AniScrollApi,

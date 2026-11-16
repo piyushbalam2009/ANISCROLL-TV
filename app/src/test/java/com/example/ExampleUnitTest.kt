@@ -20,19 +20,27 @@ class ExampleUnitTest {
         val manager = AniSkipManager()
         manager.setIntervals(
             SkipIntervals(
+                recap = TimeRange(startTimeSec = 1f, endTimeSec = 8f, skipId = "recap-1"),
                 intro = TimeRange(startTimeSec = 10f, endTimeSec = 100f, skipId = "op-1"),
                 outro = TimeRange(startTimeSec = 1300f, endTimeSec = 1390f, skipId = "ed-1")
             )
         )
 
-        // Before intro
-        assertNull(manager.evaluateCurrentPosition(5_000L))
+        // Inside recap interval
+        val recapPrompt = manager.evaluateCurrentPosition(4_000L)
+        assertNotNull(recapPrompt)
+        assertEquals(ActiveSkipType.RECAP, recapPrompt?.type)
+        assertEquals("Skip Recap", recapPrompt?.label)
+        assertEquals(8_000L, recapPrompt?.targetTimeMs)
+
+        // Before intro (after recap)
+        assertNull(manager.evaluateCurrentPosition(9_000L))
 
         // Inside intro interval
         val introPrompt = manager.evaluateCurrentPosition(25_000L)
         assertNotNull(introPrompt)
         assertEquals(ActiveSkipType.INTRO, introPrompt?.type)
-        assertEquals("Skip Intro  >>", introPrompt?.label)
+        assertEquals("Skip Intro", introPrompt?.label)
         assertEquals(100_000L, introPrompt?.targetTimeMs)
 
         // Mark skipped -> should no longer appear during same intro
@@ -43,7 +51,7 @@ class ExampleUnitTest {
         val outroPrompt = manager.evaluateCurrentPosition(1_320_000L)
         assertNotNull(outroPrompt)
         assertEquals(ActiveSkipType.OUTRO, outroPrompt?.type)
-        assertEquals("Skip Outro  >>", outroPrompt?.label)
+        assertEquals("Skip Outro", outroPrompt?.label)
     }
 
     @Test

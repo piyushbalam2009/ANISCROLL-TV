@@ -105,7 +105,8 @@ enum class PlayerFocusTarget {
     SUBTITLES,
     AUDIO,
     SPEED,
-    QUALITY
+    QUALITY,
+    SKIP_PROMPT
 }
 
 /**
@@ -147,11 +148,13 @@ fun PlayerControlsOverlay(
     onOpenQualityPanel: () -> Unit = {},
     modifier: Modifier = Modifier,
     isMovie: Boolean = false,
-    onSeekingChanged: (Boolean) -> Unit = {}
+    onSeekingChanged: (Boolean) -> Unit = {},
+    playPauseFocusRequester: FocusRequester? = null,
+    skipButtonFocusRequester: FocusRequester? = null
 ) {
     val backFocus = remember { FocusRequester() }
     val rewindFocus = remember { FocusRequester() }
-    val playPauseFocus = remember { FocusRequester() }
+    val playPauseFocus = playPauseFocusRequester ?: remember { FocusRequester() }
     val forwardFocus = remember { FocusRequester() }
     val timelineFocus = remember { FocusRequester() }
     val prevFocus = remember { FocusRequester() }
@@ -177,6 +180,7 @@ fun PlayerControlsOverlay(
                 PlayerFocusTarget.AUDIO -> audioFocus
                 PlayerFocusTarget.SPEED,
                 PlayerFocusTarget.QUALITY -> subtitlesFocus
+                PlayerFocusTarget.SKIP_PROMPT -> skipButtonFocusRequester ?: playPauseFocus
             }
             runCatching { targetRequester.requestFocus() }
         }
@@ -330,8 +334,11 @@ fun PlayerControlsOverlay(
                     .focusProperties {
                         canFocus = noPanelOpen
                         up = backFocus
-                        down = timelineFocus
+                        down = skipButtonFocusRequester ?: timelineFocus
                         left = playPauseFocus
+                        if (skipButtonFocusRequester != null) {
+                            right = skipButtonFocusRequester
+                        }
                     }
                     .onFocusChanged {
                         if (it.isFocused) {
@@ -365,7 +372,7 @@ fun PlayerControlsOverlay(
                 progressStateFlow = progressStateFlow,
                 enabled = noPanelOpen,
                 focusRequester = timelineFocus,
-                upFocusRequester = playPauseFocus,
+                upFocusRequester = skipButtonFocusRequester ?: playPauseFocus,
                 downFocusRequester = firstBottomFocus,
                 onSeekRelative = { delta ->
                     onUserActivity()
@@ -465,7 +472,7 @@ fun PlayerControlsOverlay(
                         modifier = Modifier
                             .focusProperties {
                                 canFocus = noPanelOpen
-                                up = timelineFocus
+                                up = skipButtonFocusRequester ?: timelineFocus
                                 left = when {
                                     showNextEpisode -> nextFocus
                                     showPrevEpisode -> prevFocus
@@ -496,8 +503,11 @@ fun PlayerControlsOverlay(
                         modifier = Modifier
                             .focusProperties {
                                 canFocus = noPanelOpen
-                                up = timelineFocus
+                                up = skipButtonFocusRequester ?: timelineFocus
                                 left = subtitlesFocus
+                                if (skipButtonFocusRequester != null) {
+                                    right = skipButtonFocusRequester
+                                }
                             }
                             .onFocusChanged {
                                 if (it.isFocused) {
@@ -791,7 +801,7 @@ fun PlayerProgressBar(
 }
 
 /**
- * Minimal White-Theme Skip Intro / Skip Outro pill button.
+ * Minimal White-Theme Skip Intro / Skip Recap / Skip Outro pill button.
  *
  * - Unfocused: White text (#FFFFFF) and white skip icon (#FFFFFF) on a completely transparent background.
  * - Focused: Solid white background (#FFFFFF) with black text (#000000) and black skip icon (#000000),
@@ -803,7 +813,10 @@ fun SkipIntroOutroButton(
     prompt: ActiveSkipPrompt,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     focusRequester: FocusRequester? = null,
+    controlsFocusRequester: FocusRequester? = null,
+    onNavigateToControls: (() -> Unit)? = null,
     onFocused: (() -> Unit)? = null
 ) {
     val interactionSource = remember { MutableInteractionSource() }
@@ -814,22 +827,28 @@ fun SkipIntroOutroButton(
     }
 
     val backgroundColor by animateColorAsState(
-        targetValue = if (isFocused) PureWhite else Color.Transparent,
+        targetValue = if (enabled && isFocused) PureWhite else Color.Transparent,
         animationSpec = tween(durationMillis = 140),
         label = "skip_btn_bg"
     )
     val contentColor by animateColorAsState(
-        targetValue = if (isFocused) PureBlack else PureWhite,
+        targetValue = if (enabled && isFocused) PureBlack else PureWhite,
         animationSpec = tween(durationMillis = 140),
         label = "skip_btn_fg"
     )
+    val borderColor by animateColorAsState(
+        targetValue = if (enabled && isFocused) PureWhite else PureWhite.copy(alpha = 0.55f),
+        animationSpec = tween(durationMillis = 140),
+        label = "skip_btn_border"
+    )
     val scale by animateFloatAsState(
-        targetValue = if (isFocused) 1.08f else 1.0f,
+        targetValue = if (enabled && isFocused) 1.08f else 1.0f,
         animationSpec = tween(durationMillis = 140),
         label = "skip_btn_scale"
     )
 
     val cleanLabel = when (prompt.type) {
+        ActiveSkipType.RECAP -> "Skip Recap"
         ActiveSkipType.INTRO -> "Skip Intro"
         ActiveSkipType.OUTRO -> "Skip Outro"
     }
@@ -838,6 +857,14 @@ fun SkipIntroOutroButton(
     Row(
         modifier = modifier
             .then(focusModifier)
+            .focusProperties {
+                canFocus = enabled
+                if (controlsFocusRequester != null) {
+                    left = controlsFocusRequester
+                    up = controlsFocusRequester
+                    down = controlsFocusRequester
+                }
+            }
             .minimumInteractiveComponentSize()
             .graphicsLayer {
                 scaleX = scale
@@ -845,20 +872,33 @@ fun SkipIntroOutroButton(
             }
             .clip(RoundedCornerShape(50))
             .background(backgroundColor, RoundedCornerShape(50))
+            .border(1.dp, borderColor, RoundedCornerShape(50))
             .onKeyEvent { event ->
-                if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN &&
-                    (event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
-                        event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_ENTER ||
-                        event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER)
-                ) {
-                    onClick()
-                    true
-                } else {
-                    false
+                if (!enabled || event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
+                when (event.nativeKeyEvent.keyCode) {
+                    KeyEvent.KEYCODE_DPAD_CENTER,
+                    KeyEvent.KEYCODE_ENTER,
+                    KeyEvent.KEYCODE_NUMPAD_ENTER,
+                    KeyEvent.KEYCODE_BUTTON_A -> {
+                        onClick()
+                        true
+                    }
+                    KeyEvent.KEYCODE_DPAD_LEFT,
+                    KeyEvent.KEYCODE_DPAD_UP,
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        if (onNavigateToControls != null) {
+                            onNavigateToControls()
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    else -> false
                 }
             }
-            .focusable(interactionSource = interactionSource)
+            .focusable(enabled = enabled, interactionSource = interactionSource)
             .clickable(
+                enabled = enabled,
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick
