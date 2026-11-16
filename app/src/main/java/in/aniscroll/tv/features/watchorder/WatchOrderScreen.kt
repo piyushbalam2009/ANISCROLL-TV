@@ -687,7 +687,7 @@ private fun WatchOrderTimelineRow(
                     text = entry.preferredTitle,
                     style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                     color = primaryContentColor,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
 

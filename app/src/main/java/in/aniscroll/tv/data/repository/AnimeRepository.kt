@@ -14,6 +14,7 @@ import `in`.aniscroll.tv.domain.model.Anime
 import `in`.aniscroll.tv.domain.model.Episode
 import `in`.aniscroll.tv.domain.model.ScheduleItem
 import `in`.aniscroll.tv.domain.model.WatchProgressItem
+import `in`.aniscroll.tv.domain.model.sanitizeAnimeTitle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -85,15 +86,25 @@ class AnimeRepository(
     // --- Watchlist (My List) ---
     val watchlistFlow: Flow<List<Anime>> = dao.observeWatchlist().map { list ->
         list.map { entity ->
+            val cached = dao.getCachedAnime(entity.hoshikaId)?.toDomain()
+            val cleanTitle = sanitizeAnimeTitle(entity.animeTitle)
+                ?: cached?.preferredTitle?.takeIf { it.isNotBlank() }
+                ?: ""
             Anime(
                 hoshikaId = entity.hoshikaId,
-                title = entity.animeTitle,
-                englishTitle = entity.animeTitle,
-                posterUrl = entity.posterUrl,
-                bannerUrl = entity.bannerUrl,
-                logoUrl = entity.logoUrl,
-                releaseYear = entity.releaseYear,
-                status = entity.status
+                anilistId = cached?.anilistId,
+                malId = cached?.malId,
+                tmdbId = cached?.tmdbId,
+                title = cached?.title ?: cleanTitle,
+                englishTitle = cached?.englishTitle ?: cleanTitle.takeIf { it.isNotBlank() },
+                japaneseTitle = cached?.japaneseTitle,
+                posterUrl = entity.posterUrl ?: cached?.posterUrl,
+                bannerUrl = entity.bannerUrl ?: cached?.bannerUrl,
+                logoUrl = entity.logoUrl ?: cached?.logoUrl,
+                releaseYear = entity.releaseYear ?: cached?.releaseYear,
+                status = entity.status ?: cached?.status,
+                format = cached?.format,
+                totalEpisodes = cached?.totalEpisodes
             )
         }
     }
@@ -125,15 +136,17 @@ class AnimeRepository(
 
     // --- Continue Watching & Watch History ---
     val continueWatchingFlow: Flow<List<WatchProgressItem>> = dao.observeContinueWatching().map { list ->
-        list.map { it.toDomain() }
+        list.map { resolveWatchProgressItem(it) }
     }
 
     val allWatchHistoryFlow: Flow<List<WatchProgressItem>> = dao.observeAllWatchHistory().map { list ->
-        list.map { it.toDomain() }
+        list.map { resolveWatchProgressItem(it) }
     }
 
     fun observeWatchHistoryForAnime(hoshikaId: Long): Flow<List<WatchProgressItem>> =
-        dao.observeWatchHistoryForAnime(hoshikaId).map { list -> list.map { it.toDomain() } }
+        dao.observeWatchHistoryForAnime(hoshikaId).map { list ->
+            list.map { resolveWatchProgressItem(it) }
+        }
 
     suspend fun removeContinueWatching(hoshikaId: Long, episodeNumber: Int) {
         dao.removeContinueWatchingItem(hoshikaId, episodeNumber)
@@ -233,7 +246,9 @@ class AnimeRepository(
                     "recently_updated" to "Recently Updated",
                     "popular" to "Popular Anime",
                     "upcoming" to "Upcoming Anime",
-                    "recommended" to "Recommended Anime"
+                    "recommended" to "Recommended Anime",
+                    "media" to "Trending Anime",
+                    "list" to "Trending Anime"
                 )
                 for ((key, title) in homeSectionMappings) {
                     val arr = dataObj.optJSONArray(key) ?: continue
@@ -427,7 +442,10 @@ class AnimeRepository(
     private suspend fun fetchRemoteAnimeDetails(hoshikaId: Long): Anime? = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         animeMemoryCache[hoshikaId]?.takeIf { now - it.cachedAtMs < ANIME_CACHE_TTL_MS }?.value?.let { mem ->
-            if (!mem.format.isNullOrBlank() && (!mem.englishTitle.isNullOrBlank() || mem.totalEpisodes != null)) {
+            if (!mem.format.isNullOrBlank() &&
+                mem.preferredTitle.isNotBlank() &&
+                (!mem.englishTitle.isNullOrBlank() || mem.totalEpisodes != null)
+            ) {
                 return@withContext mem
             }
         }
@@ -895,13 +913,51 @@ class AnimeRepository(
         return null
     }
 
+    private fun mergeWithExistingAnime(
+        incoming: Anime,
+        existingAnime: AnimeEntity?,
+        existingLogoUrl: String?,
+        existingTmdbId: Long?
+    ): Anime {
+        val existingEnglish = sanitizeAnimeTitle(existingAnime?.englishTitle)
+        val existingRomaji = sanitizeAnimeTitle(existingAnime?.title)
+        val existingJapanese = sanitizeAnimeTitle(existingAnime?.japaneseTitle)
+
+        val incomingEnglish = sanitizeAnimeTitle(incoming.englishTitle)
+        val incomingRomaji = sanitizeAnimeTitle(incoming.title)
+        val incomingJapanese = sanitizeAnimeTitle(incoming.japaneseTitle)
+
+        val resolvedRomaji = incomingRomaji ?: existingRomaji ?: incomingEnglish ?: existingEnglish ?: ""
+        val resolvedEnglish = incomingEnglish ?: existingEnglish
+        val resolvedJapanese = incomingJapanese ?: existingJapanese
+
+        return incoming.copy(
+            anilistId = incoming.anilistId ?: existingAnime?.anilistId,
+            title = resolvedRomaji,
+            englishTitle = resolvedEnglish,
+            japaneseTitle = resolvedJapanese,
+            description = incoming.description?.takeIf { it.isNotBlank() } ?: existingAnime?.description,
+            posterUrl = incoming.posterUrl?.takeIf { it.isNotBlank() } ?: existingAnime?.posterUrl,
+            bannerUrl = incoming.bannerUrl?.takeIf { it.isNotBlank() } ?: existingAnime?.bannerUrl,
+            logoUrl = incoming.logoUrl ?: existingLogoUrl ?: existingAnime?.logoUrl,
+            tmdbId = incoming.tmdbId ?: existingTmdbId ?: existingAnime?.tmdbId,
+            releaseYear = incoming.releaseYear ?: existingAnime?.releaseYear,
+            season = incoming.season ?: existingAnime?.season,
+            status = incoming.status ?: existingAnime?.status,
+            format = incoming.format ?: existingAnime?.format,
+            totalEpisodes = incoming.totalEpisodes ?: existingAnime?.totalEpisodes
+        )
+    }
+
     private suspend fun cacheAnime(anime: Anime) {
         idConverter.cacheMappingIfValid(anime.hoshikaId, anime.anilistId)
         val existingAnime = dao.getCachedAnime(anime.hoshikaId)
         val existingLogo = dao.getLogoCache(anime.hoshikaId)?.takeIf { it.validationStatus == "VALID" }
-        val merged = anime.copy(
-            logoUrl = anime.logoUrl ?: existingLogo?.logoUrl ?: existingAnime?.logoUrl,
-            tmdbId = anime.tmdbId ?: existingLogo?.tmdbId ?: existingAnime?.tmdbId
+        val merged = mergeWithExistingAnime(
+            incoming = anime,
+            existingAnime = existingAnime,
+            existingLogoUrl = existingLogo?.logoUrl,
+            existingTmdbId = existingLogo?.tmdbId
         )
         animeMemoryCache[merged.hoshikaId] = TimedCacheEntry(merged, System.currentTimeMillis())
         dao.insertAnime(merged.toEntity())
@@ -914,9 +970,11 @@ class AnimeRepository(
             idConverter.cacheMappingIfValid(anime.hoshikaId, anime.anilistId)
             val existingAnime = dao.getCachedAnime(anime.hoshikaId)
             val existingLogo = dao.getLogoCache(anime.hoshikaId)?.takeIf { it.validationStatus == "VALID" }
-            val merged = anime.copy(
-                logoUrl = anime.logoUrl ?: existingLogo?.logoUrl ?: existingAnime?.logoUrl,
-                tmdbId = anime.tmdbId ?: existingLogo?.tmdbId ?: existingAnime?.tmdbId
+            val merged = mergeWithExistingAnime(
+                incoming = anime,
+                existingAnime = existingAnime,
+                existingLogoUrl = existingLogo?.logoUrl,
+                existingTmdbId = existingLogo?.tmdbId
             )
             animeMemoryCache[merged.hoshikaId] = TimedCacheEntry(merged, now)
             merged.toEntity()
@@ -944,39 +1002,52 @@ class AnimeRepository(
         lastUpdated = System.currentTimeMillis()
     )
 
-    private fun AnimeEntity.toDomain(): Anime = Anime(
-        hoshikaId = hoshikaId,
-        anilistId = anilistId,
-        tmdbId = tmdbId,
-        title = title,
-        englishTitle = englishTitle,
-        japaneseTitle = japaneseTitle,
-        description = description,
-        posterUrl = posterUrl,
-        bannerUrl = bannerUrl,
-        logoUrl = logoUrl,
-        releaseYear = releaseYear,
-        season = season,
-        status = status,
-        format = format,
-        totalEpisodes = totalEpisodes,
-        genres = genresCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-    )
+    private fun AnimeEntity.toDomain(): Anime {
+        val cleanEnglish = sanitizeAnimeTitle(englishTitle)
+        val cleanRomaji = sanitizeAnimeTitle(title) ?: cleanEnglish ?: ""
+        val cleanJapanese = sanitizeAnimeTitle(japaneseTitle)
+        return Anime(
+            hoshikaId = hoshikaId,
+            anilistId = anilistId,
+            tmdbId = tmdbId,
+            title = cleanRomaji,
+            englishTitle = cleanEnglish,
+            japaneseTitle = cleanJapanese,
+            description = description,
+            posterUrl = posterUrl,
+            bannerUrl = bannerUrl,
+            logoUrl = logoUrl,
+            releaseYear = releaseYear,
+            season = season,
+            status = status,
+            format = format,
+            totalEpisodes = totalEpisodes,
+            genres = genresCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        )
+    }
 
-    private fun WatchHistoryEntity.toDomain(): WatchProgressItem = WatchProgressItem(
-        hoshikaId = hoshikaId,
-        anilistId = anilistId,
-        animeTitle = animeTitle.ifBlank { "Anime #$hoshikaId" },
-        posterUrl = posterUrl,
-        bannerUrl = bannerUrl,
-        logoUrl = logoUrl,
-        episodeNumber = episodeNumber,
-        language = language,
-        positionMs = position,
-        durationMs = duration,
-        completed = completed,
-        lastWatched = lastWatched
-    )
+    private suspend fun resolveWatchProgressItem(entity: WatchHistoryEntity): WatchProgressItem {
+        val directTitle = sanitizeAnimeTitle(entity.animeTitle)
+            ?.takeIf { !it.startsWith("Anime #") }
+        val resolvedTitle = directTitle
+            ?: dao.getCachedAnime(entity.hoshikaId)?.toDomain()?.preferredTitle?.takeIf { it.isNotBlank() }
+            ?: sanitizeAnimeTitle(entity.animeTitle)
+            ?: ""
+        return WatchProgressItem(
+            hoshikaId = entity.hoshikaId,
+            anilistId = entity.anilistId,
+            animeTitle = resolvedTitle,
+            posterUrl = entity.posterUrl,
+            bannerUrl = entity.bannerUrl,
+            logoUrl = entity.logoUrl,
+            episodeNumber = entity.episodeNumber,
+            language = entity.language,
+            positionMs = entity.position,
+            durationMs = entity.duration,
+            completed = entity.completed,
+            lastWatched = entity.lastWatched
+        )
+    }
 
     // --- Franchise Watch Order (AniList GraphQL Relations + Hoshika Relations) ---
     suspend fun getFranchiseWatchOrder(
@@ -1109,9 +1180,9 @@ class AnimeRepository(
                     episodes = stubDetails?.totalEpisodes,
                     releaseYear = stubDetails?.releaseYear,
                     startDateNumeric = (stubDetails?.releaseYear ?: 9999) * 10000 + 1332,
-                    titleRomaji = stubDetails?.title ?: stub.title,
-                    titleEnglish = stubDetails?.englishTitle ?: stub.title,
-                    titleNative = stubDetails?.japaneseTitle,
+                    titleRomaji = stubDetails?.title?.takeIf { it.isNotBlank() } ?: stub.title,
+                    titleEnglish = stubDetails?.englishTitle ?: stub.englishTitle,
+                    titleNative = stubDetails?.japaneseTitle ?: stub.japaneseTitle,
                     description = stubDetails?.description,
                     posterUrl = stubDetails?.posterUrl ?: stub.coverImage,
                     bannerUrl = stubDetails?.bannerUrl

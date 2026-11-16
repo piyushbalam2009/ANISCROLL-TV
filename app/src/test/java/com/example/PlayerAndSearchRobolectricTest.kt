@@ -1529,6 +1529,315 @@ class PlayerAndSearchRobolectricTest {
         assertEquals("Selecting Episode 250 (at list index 248) must play episode 250", 250, playedEpisodeNumber)
     }
 
+    @Test
+    fun animeTitleExtraction_handlesNestedTitleObjects_arrays_nullStrings_andPriorityOrder() = runTest {
+        val rawHomePayload = """
+            {
+              "ok": true,
+              "trending": [
+                {
+                  "shortId": 1001,
+                  "title": {
+                    "english": "Attack on Titan",
+                    "romaji": "Shingeki no Kyojin",
+                    "native": "進撃の巨人"
+                  },
+                  "format": "TV"
+                },
+                {
+                  "shortId": 1002,
+                  "title": {
+                    "english": "Solo Leveling"
+                  },
+                  "format": "TV"
+                },
+                {
+                  "shortId": 1003,
+                  "title": {
+                    "english": "null",
+                    "romaji": "Kimetsu no Yaiba",
+                    "native": "鬼滅の刃"
+                  },
+                  "format": "TV"
+                },
+                {
+                  "shortId": 1004,
+                  "title": {
+                    "english": "",
+                    "romaji": "undefined",
+                    "native": "葬送のフリーレン"
+                  },
+                  "format": "TV"
+                },
+                {
+                  "shortId": 1005,
+                  "titles": [
+                    { "type": "Default", "title": "ONE PIECE" },
+                    { "type": "English", "title": "One Piece" }
+                  ],
+                  "format": "TV"
+                },
+                {
+                  "shortId": 1006,
+                  "format": "TV"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val parsed = `in`.aniscroll.tv.data.remote.JsonParsers.parseAnimeListFromResponse(rawHomePayload)
+        // Item 1006 lacks any title and should be safely skipped instead of showing "null" or raw JSON
+        assertEquals(5, parsed.size)
+
+        val aot = parsed.first { it.hoshikaId == 1001L }
+        assertEquals("Attack on Titan", aot.preferredTitle)
+        assertEquals("Shingeki no Kyojin", aot.title)
+
+        val solo = parsed.first { it.hoshikaId == 1002L }
+        assertEquals("Solo Leveling", solo.preferredTitle)
+        assertFalse(solo.preferredTitle.startsWith("{"))
+
+        val demon = parsed.first { it.hoshikaId == 1003L }
+        assertEquals("Kimetsu no Yaiba", demon.preferredTitle)
+
+        val frieren = parsed.first { it.hoshikaId == 1004L }
+        assertEquals("葬送のフリーレン", frieren.preferredTitle)
+
+        val onePiece = parsed.first { it.hoshikaId == 1005L }
+        assertEquals("One Piece", onePiece.preferredTitle)
+
+        // Streaming response should also extract optional anime title when present
+        val streamJson = """
+            {
+              "ok": true,
+              "title": "Frieren: Beyond Journey's End",
+              "hlsProxyUrl": "https://anivault-scraper-five.vercel.app/api/proxy/hls?url=master.m3u8"
+            }
+        """.trimIndent()
+        val streamData = `in`.aniscroll.tv.data.remote.JsonParsers.parseAniScrollStreamResponse(
+            anilistId = 154587L,
+            episodeNumber = 1,
+            language = "sub",
+            rawBody = streamJson
+        )
+        assertNotNull(streamData)
+        assertEquals("Frieren: Beyond Journey's End", streamData!!.title)
+    }
+
+    @Test
+    fun animeTitleUiDisplay_rendersTitleInHomeScreenEvenWhileLogoLoads() = runTest {
+        val fakeHoshika = FakeHoshikaApi(
+            homeJson = """
+                {
+                  "ok": true,
+                  "data": {
+                    "trending": [
+                      {
+                        "shortId": 83885,
+                        "title": {
+                          "english": "Solo Leveling",
+                          "romaji": "Ore dake Level Up na Ken"
+                        },
+                        "logoUrl": "https://example.com/slow-logo.png",
+                        "coverImage": "https://cdn.hoshika.app/covers/83885.webp",
+                        "format": "TV"
+                      },
+                      {
+                        "shortId": 99001,
+                        "title": {
+                          "romaji": "Sousou no Frieren",
+                          "english": null
+                        },
+                        "format": "TV"
+                      }
+                    ]
+                  }
+                }
+            """.trimIndent()
+        )
+        val repo = createAnimeRepository(fakeHoshika, FakeAniScrollApi())
+        val homeVm = HomeViewModel(repo)
+
+        composeTestRule.setContent {
+            HomeScreen(
+                viewModel = homeVm,
+                onOpenAnimeDetails = {},
+                onPlayEpisode = { _, _, _ -> }
+            )
+        }
+        composeTestRule.waitUntil(timeoutMillis = 5000) {
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            !homeVm.uiState.value.isLoading && homeVm.uiState.value.sections.isNotEmpty()
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("anime_logo_text_fallback_83885").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Sousou no Frieren").assertIsDisplayed()
+    }
+
+    @Test
+    fun animeTitleUiDisplay_rendersTitleInDetailsScreenEvenWhileLogoLoads() = runTest {
+        val fakeHoshika = FakeHoshikaApi(
+            detailsJson = """
+                {
+                  "ok": true,
+                  "anime": {
+                    "shortId": 83885,
+                    "anilistId": 151807,
+                    "title": {
+                      "english": "Solo Leveling",
+                      "romaji": "Ore dake Level Up na Ken",
+                      "native": "俺だけレベルアップな件"
+                    },
+                    "logoUrl": "https://example.com/slow-logo.png",
+                    "description": "A weak hunter gains a leveling system.",
+                    "format": "TV",
+                    "seasonYear": 2024
+                  }
+                }
+            """.trimIndent()
+        )
+        val repo = createAnimeRepository(fakeHoshika, FakeAniScrollApi())
+        val detailsVm = `in`.aniscroll.tv.features.details.DetailsViewModel(repo)
+
+        composeTestRule.setContent {
+            `in`.aniscroll.tv.features.details.DetailsScreen(
+                hoshikaId = 83885L,
+                viewModel = detailsVm,
+                onPlayEpisode = { _, _, _ -> },
+                onOpenEpisodesScreen = {},
+                onBack = {}
+            )
+        }
+        composeTestRule.waitUntil(timeoutMillis = 5000) {
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            detailsVm.uiState.value.anime != null
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("anime_logo_text_fallback_83885").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Ore dake Level Up na Ken").assertIsDisplayed()
+    }
+
+    @Test
+    fun animeTitleUiDisplay_resolvesCachedTitleInHistoryAndRendersInPlayer() = runTest {
+        val repo = createAnimeRepository(FakeHoshikaApi(), FakeAniScrollApi())
+        dao.insertAnime(
+            `in`.aniscroll.tv.core.database.AnimeEntity(
+                hoshikaId = 83885L,
+                anilistId = 151807L,
+                title = "Ore dake Level Up na Ken",
+                englishTitle = "Solo Leveling",
+                japaneseTitle = "俺だけレベルアップな件",
+                description = "A weak hunter gains a leveling system.",
+                posterUrl = null,
+                bannerUrl = null,
+                logoUrl = "https://example.com/slow-logo.png",
+                releaseYear = 2024,
+                season = null,
+                status = "FINISHED",
+                format = "TV",
+                totalEpisodes = 12,
+                genresCsv = "Action",
+                tmdbId = null,
+                lastUpdated = System.currentTimeMillis()
+            )
+        )
+        dao.upsertWatchHistory(
+            `in`.aniscroll.tv.core.database.WatchHistoryEntity(
+                hoshikaId = 83885L,
+                anilistId = 151807L,
+                animeTitle = "Anime #83885",
+                posterUrl = null,
+                bannerUrl = null,
+                logoUrl = null,
+                episodeNumber = 1,
+                language = "sub",
+                position = 120_000L,
+                duration = 1_440_000L,
+                completed = false,
+                lastWatched = System.currentTimeMillis()
+            )
+        )
+
+        val historyVm = `in`.aniscroll.tv.features.history.HistoryViewModel(repo)
+        composeTestRule.setContent {
+            androidx.compose.foundation.layout.Column {
+                Box(modifier = androidx.compose.ui.Modifier.weight(1f)) {
+                    `in`.aniscroll.tv.features.history.HistoryScreen(
+                        viewModel = historyVm,
+                        onResumePlayback = { _, _, _ -> },
+                        onOpenAnimeDetails = {}
+                    )
+                }
+                Box(modifier = androidx.compose.ui.Modifier.weight(1f)) {
+                    PlayerControlsOverlay(
+                        animeTitle = "Frieren: Beyond Journey's End",
+                        episodeNumber = 1,
+                        episodeTitle = "The Journey's End",
+                        audioLanguage = "sub",
+                        selectedQualityLabel = "1080p",
+                        playbackSpeed = 1.0f,
+                        isPlaying = true,
+                        hasPreviousEpisode = false,
+                        hasNextEpisode = true,
+                        progressStateFlow = MutableStateFlow(PlaybackProgressState(60_000L, 120_000L, 1_440_000L)),
+                        activePanel = PlayerSettingsPanel.NONE,
+                        canInteract = true,
+                        lastFocusTarget = PlayerFocusTarget.PLAY_PAUSE,
+                        onSeekingChanged = {},
+                        onFocusTargetChanged = {},
+                        onUserActivity = {},
+                        onBackClick = {},
+                        onPreviousEpisode = {},
+                        onSeekRelative = {},
+                        onTogglePlayPause = {},
+                        onNextEpisode = {},
+                        onToggleAudioLanguage = {},
+                        onOpenSubtitlesPanel = {},
+                        onOpenSpeedPanel = {},
+                        onOpenQualityPanel = {}
+                    )
+                }
+            }
+        }
+        composeTestRule.waitUntil(timeoutMillis = 5000) {
+            org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+            historyVm.continueWatching.value.isNotEmpty()
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Solo Leveling").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Frieren: Beyond Journey's End").assertIsDisplayed()
+    }
+
+    @Test
+    fun sidebar_doesNotAutomaticallyExpandOnFocusChange_andTogglesViaBrandHeader() = runTest {
+        var selectedDest = `in`.aniscroll.tv.navigation.TvDestination.HOME
+        composeTestRule.setContent {
+            `in`.aniscroll.tv.navigation.TvNavigationSidebar(
+                selectedDestination = selectedDest,
+                onSelectDestination = { selectedDest = it }
+            )
+        }
+        composeTestRule.waitForIdle()
+        // Initially collapsed (ANISCROLL TV label not displayed)
+        composeTestRule.onNodeWithText("ANISCROLL TV").assertDoesNotExist()
+
+        // Focus or click navigation item (e.g. Search) - must NOT expand sidebar automatically
+        composeTestRule.onNodeWithTag("nav_search").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(`in`.aniscroll.tv.navigation.TvDestination.SEARCH, selectedDest)
+        composeTestRule.onNodeWithText("ANISCROLL TV").assertDoesNotExist()
+
+        // Click / activate brand header to toggle expansion
+        composeTestRule.onNodeWithTag("sidebar_brand_header").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("ANISCROLL TV").assertIsDisplayed()
+
+        // Click brand header again to collapse
+        composeTestRule.onNodeWithTag("sidebar_brand_header").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("ANISCROLL TV").assertDoesNotExist()
+    }
+
     private fun createAnimeRepository(
         hoshikaApi: HoshikaApi,
         aniScrollApi: AniScrollApi,

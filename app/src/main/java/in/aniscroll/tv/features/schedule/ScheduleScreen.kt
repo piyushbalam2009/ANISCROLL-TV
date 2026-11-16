@@ -313,7 +313,7 @@ private fun ScheduleEntryRow(
                 text = item.anime.preferredTitle,
                 style = MaterialTheme.typography.titleLarge,
                 color = TvColors.PrimaryText,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(modifier = Modifier.height(4.dp))

@@ -166,10 +166,10 @@ private fun ContinueWatchingRowCard(
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = item.animeTitle,
+                text = item.animeTitle.ifBlank { "Episode ${item.episodeNumber}" },
                 style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                 color = TvColors.PrimaryText,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(modifier = Modifier.height(4.dp))

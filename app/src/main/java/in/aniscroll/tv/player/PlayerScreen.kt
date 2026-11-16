@@ -413,7 +413,9 @@ fun PlayerScreen(
             modifier = Modifier.fillMaxSize()
         ) {
             PlayerControlsOverlay(
-                animeTitle = state.anime?.preferredTitle ?: "Playing Anime",
+                animeTitle = state.anime?.preferredTitle?.takeIf { it.isNotBlank() }
+                    ?: state.currentEpisodeTitle?.takeIf { it.isNotBlank() }
+                    ?: "Episode ${state.currentEpisodeNumber}",
                 episodeNumber = state.currentEpisodeNumber,
                 episodeTitle = state.currentEpisodeTitle,
                 audioLanguage = state.audioLanguage,

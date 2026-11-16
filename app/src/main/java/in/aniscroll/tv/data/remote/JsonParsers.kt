@@ -17,82 +17,257 @@ import java.util.TimeZone
 
 object JsonParsers {
 
+    data class ExtractedTitles(
+        val english: String?,
+        val romaji: String?,
+        val native: String?
+    ) {
+        val primary: String?
+            get() = romaji ?: english ?: native
+    }
+
+    fun extractTitles(json: JSONObject): ExtractedTitles {
+        var english: String? = json.optCleanString("titleEnglish")
+            ?: json.optCleanString("title_english")
+            ?: json.optCleanString("englishTitle")
+            ?: json.optCleanString("english_title")
+            ?: json.optCleanString("titleLocalized")
+            ?: json.optCleanString("title_localized")
+            ?: json.optCleanString("localizedTitle")
+            ?: json.optCleanString("titleEn")
+            ?: json.optCleanString("title_en")
+            ?: json.optCleanString("enTitle")
+            ?: json.optCleanString("en_title")
+            ?: json.optCleanString("english")
+
+        var romaji: String? = json.optCleanString("titleRomaji")
+            ?: json.optCleanString("title_romaji")
+            ?: json.optCleanString("romajiTitle")
+            ?: json.optCleanString("romaji_title")
+            ?: json.optCleanString("romaji")
+            ?: json.optCleanString("canonicalTitle")
+            ?: json.optCleanString("canonical_title")
+            ?: json.optCleanString("userPreferred")
+            ?: json.optCleanString("user_preferred")
+            ?: json.optCleanString("displayTitle")
+            ?: json.optCleanString("display_title")
+            ?: json.optCleanString("mainTitle")
+            ?: json.optCleanString("main_title")
+
+        var nativeTitle: String? = json.optCleanString("titleNative")
+            ?: json.optCleanString("title_native")
+            ?: json.optCleanString("nativeTitle")
+            ?: json.optCleanString("native_title")
+            ?: json.optCleanString("titleJapanese")
+            ?: json.optCleanString("title_japanese")
+            ?: json.optCleanString("japaneseTitle")
+            ?: json.optCleanString("japanese_title")
+            ?: json.optCleanString("native")
+            ?: json.optCleanString("japanese")
+
+        val titleObjects = listOfNotNull(
+            json.optJSONObject("title"),
+            json.optJSONObject("titles"),
+            json.optJSONObject("name")
+        )
+        for (obj in titleObjects) {
+            if (english == null) {
+                english = obj.optCleanString("english")
+                    ?: obj.optCleanString("en")
+                    ?: obj.optCleanString("en_us")
+                    ?: obj.optCleanString("enUs")
+                    ?: obj.optCleanString("en_jp")
+                    ?: obj.optCleanString("enJp")
+                    ?: obj.optCleanString("localized")
+                    ?: obj.optCleanString("us")
+            }
+            if (romaji == null) {
+                romaji = obj.optCleanString("romaji")
+                    ?: obj.optCleanString("ro")
+                    ?: obj.optCleanString("userPreferred")
+                    ?: obj.optCleanString("user_preferred")
+                    ?: obj.optCleanString("default")
+                    ?: obj.optCleanString("main")
+                    ?: obj.optCleanString("canonical")
+                    ?: obj.optCleanString("x-jat")
+            }
+            if (nativeTitle == null) {
+                nativeTitle = obj.optCleanString("native")
+                    ?: obj.optCleanString("japanese")
+                    ?: obj.optCleanString("ja")
+                    ?: obj.optCleanString("ja_jp")
+                    ?: obj.optCleanString("jp")
+                    ?: obj.optCleanString("original")
+            }
+        }
+
+        val titleArrays = listOfNotNull(
+            json.optJSONArray("titles"),
+            json.optJSONArray("alternativeTitles"),
+            json.optJSONArray("alternative_titles")
+        )
+        for (arr in titleArrays) {
+            for (i in 0 until arr.length()) {
+                when (val entry = arr.opt(i)) {
+                    is JSONObject -> {
+                        val value = entry.optCleanString("title")
+                            ?: entry.optCleanString("value")
+                            ?: entry.optCleanString("name")
+                            ?: entry.optCleanString("text")
+                            ?: continue
+                        val type = (entry.optCleanString("type")
+                            ?: entry.optCleanString("lang")
+                            ?: entry.optCleanString("language")
+                            ?: "").lowercase(Locale.ROOT)
+                        when {
+                            type == "english" || type == "en" || type == "en-us" || type == "en_us" -> {
+                                if (english == null) english = value
+                            }
+                            type == "japanese" || type == "native" || type == "ja" || type == "jp" -> {
+                                if (nativeTitle == null) nativeTitle = value
+                            }
+                            type == "default" || type == "romaji" || type == "main" || type == "canonical" || type == "x-jat" -> {
+                                if (romaji == null) romaji = value
+                            }
+                            else -> {
+                                if (romaji == null) romaji = value
+                            }
+                        }
+                    }
+                    is String -> {
+                        val clean = entry.takeCleanString()
+                        if (clean != null && romaji == null) {
+                            romaji = clean
+                        }
+                    }
+                }
+            }
+        }
+
+        if (romaji == null) {
+            romaji = json.optCleanString("title") ?: json.optCleanString("name")
+        }
+
+        return ExtractedTitles(
+            english = english,
+            romaji = romaji,
+            native = nativeTitle
+        )
+    }
+
     fun parseHoshikaAnime(json: JSONObject): Anime? {
+        val nestedAnime = json.optJSONObject("anime")
+            ?: json.optJSONObject("media")
+            ?: json.optJSONObject("show")
+
         val hoshikaId = json.optLong("shortId", 0L).takeIf { it > 0L }
             ?: json.optLong("hoshika_id", 0L).takeIf { it > 0L }
             ?: json.optLong("hoshikaId", 0L).takeIf { it > 0L }
             ?: json.optLong("id", 0L).takeIf { it > 0L }
+            ?: nestedAnime?.optLong("shortId", 0L)?.takeIf { it > 0L }
+            ?: nestedAnime?.optLong("hoshika_id", 0L)?.takeIf { it > 0L }
+            ?: nestedAnime?.optLong("hoshikaId", 0L)?.takeIf { it > 0L }
+            ?: nestedAnime?.optLong("id", 0L)?.takeIf { it > 0L }
             ?: return null
 
-        // Extract AniList ID strictly from Hoshika's anilist mapping field (never MAL or Hoshika ID)
-        val mappingsObj = json.optJSONObject("mappings")
-            ?: json.optJSONObject("external_ids")
-            ?: json.optJSONObject("externalIds")
-            ?: json.optJSONObject("crossReferences")
+        val primaryJson = if (nestedAnime != null &&
+            json.opt("title") == null &&
+            json.opt("titles") == null &&
+            json.opt("titleRomaji") == null &&
+            json.opt("titleEnglish") == null &&
+            json.opt("name") == null
+        ) {
+            nestedAnime
+        } else {
+            json
+        }
 
-        val anilistId = json.optLong("anilist_id", 0L).takeIf { it > 0L }
-            ?: json.optLong("anilistId", 0L).takeIf { it > 0L }
+        // Extract AniList ID strictly from Hoshika's anilist mapping field (never MAL or Hoshika ID)
+        val mappingsObj = primaryJson.optJSONObject("mappings")
+            ?: primaryJson.optJSONObject("external_ids")
+            ?: primaryJson.optJSONObject("externalIds")
+            ?: primaryJson.optJSONObject("crossReferences")
+            ?: nestedAnime?.optJSONObject("mappings")
+
+        val anilistId = primaryJson.optLong("anilist_id", 0L).takeIf { it > 0L }
+            ?: primaryJson.optLong("anilistId", 0L).takeIf { it > 0L }
             ?: mappingsObj?.optLong("anilist_id", 0L)?.takeIf { it > 0L }
             ?: mappingsObj?.optLong("anilist", 0L)?.takeIf { it > 0L }
             ?: mappingsObj?.optLong("anilistId", 0L)?.takeIf { it > 0L }
 
-        val malId = json.optLong("mal_id", 0L).takeIf { it > 0L }
-            ?: json.optLong("malId", 0L).takeIf { it > 0L }
+        val malId = primaryJson.optLong("mal_id", 0L).takeIf { it > 0L }
+            ?: primaryJson.optLong("malId", 0L).takeIf { it > 0L }
             ?: mappingsObj?.optLong("mal_id", 0L)?.takeIf { it > 0L }
             ?: mappingsObj?.optLong("mal", 0L)?.takeIf { it > 0L }
 
-        val tmdbId = json.optLong("tmdb_id", 0L).takeIf { it > 0L }
-            ?: json.optLong("tmdbId", 0L).takeIf { it > 0L }
+        val tmdbId = primaryJson.optLong("tmdb_id", 0L).takeIf { it > 0L }
+            ?: primaryJson.optLong("tmdbId", 0L).takeIf { it > 0L }
             ?: mappingsObj?.optLong("tmdb_id", 0L)?.takeIf { it > 0L }
             ?: mappingsObj?.optLong("tmdb", 0L)?.takeIf { it > 0L }
 
-        val titleObj = json.optJSONObject("title")
-        val romajiTitle = json.optString("titleRomaji").takeNonNull()
-            ?: titleObj?.optString("romaji").takeNonNull()
-            ?: titleObj?.optString("default").takeNonNull()
-            ?: json.optString("title").takeNonNull()
-            ?: json.optString("name").takeNonNull()
+        val primaryTitles = extractTitles(primaryJson)
+        val fallbackTitles = if (nestedAnime != null && nestedAnime !== primaryJson) {
+            extractTitles(nestedAnime)
+        } else {
+            null
+        }
 
-        val englishTitle = json.optString("titleEnglish").takeNonNull()
-            ?: json.optString("titleLocalized").takeNonNull()
-            ?: titleObj?.optString("english").takeNonNull()
-            ?: json.optString("english_title").takeNonNull()
-            ?: json.optString("englishTitle").takeNonNull()
+        val englishTitle = primaryTitles.english ?: fallbackTitles?.english
+        val romajiTitle = primaryTitles.romaji ?: fallbackTitles?.romaji
+        val japaneseTitle = primaryTitles.native ?: fallbackTitles?.native
+        val primaryTitle = romajiTitle ?: englishTitle ?: japaneseTitle
 
-        val japaneseTitle = json.optString("titleJapanese").takeNonNull()
-            ?: titleObj?.optString("native").takeNonNull()
-            ?: titleObj?.optString("japanese").takeNonNull()
-            ?: json.optString("japanese_title").takeNonNull()
-            ?: json.optString("japaneseTitle").takeNonNull()
+        if (primaryTitle == null) {
+            val keysPreview = buildList {
+                val it = primaryJson.keys()
+                while (it.hasNext() && size < 15) {
+                    add(it.next())
+                }
+            }.joinToString(",")
+            `in`.aniscroll.tv.features.search.SearchLogger.w(
+                "Metadata mapping failure: Missing anime title for hoshikaId=$hoshikaId keys=[$keysPreview]"
+            )
+            return null
+        }
 
-        val primaryTitle = romajiTitle ?: englishTitle ?: japaneseTitle ?: return null
+        val artworkObj = primaryJson.optJSONObject("artwork")
+            ?: primaryJson.optJSONObject("images")
+        val coverObj = primaryJson.optJSONObject("coverImage")
+            ?: primaryJson.optJSONObject("poster")
+            ?: primaryJson.optJSONObject("image")
+        val bannerObj = primaryJson.optJSONObject("bannerImage")
+            ?: primaryJson.optJSONObject("banner")
 
-        val artworkObj = json.optJSONObject("artwork")
-            ?: json.optJSONObject("images")
+        val posterUrl = primaryJson.optCleanString("coverImage")
+            ?: primaryJson.optCleanString("poster")
+            ?: primaryJson.optCleanString("poster_url")
+            ?: primaryJson.optCleanString("posterUrl")
+            ?: primaryJson.optCleanString("cover")
+            ?: primaryJson.optCleanString("image")
+            ?: coverObj?.optCleanString("extraLarge")
+            ?: coverObj?.optCleanString("large")
+            ?: coverObj?.optCleanString("medium")
+            ?: coverObj?.optCleanString("url")
+            ?: artworkObj?.optCleanString("poster")
+            ?: artworkObj?.optCleanString("large")
 
-        val posterUrl = json.optString("coverImage").takeNonNull()
-            ?: json.optString("poster").takeNonNull()
-            ?: json.optString("poster_url").takeNonNull()
-            ?: json.optString("posterUrl").takeNonNull()
-            ?: json.optString("cover").takeNonNull()
-            ?: json.optString("image").takeNonNull()
-            ?: artworkObj?.optString("poster").takeNonNull()
-            ?: artworkObj?.optString("large").takeNonNull()
+        val bannerUrl = primaryJson.optCleanString("bannerImage")
+            ?: primaryJson.optCleanString("banner")
+            ?: primaryJson.optCleanString("banner_url")
+            ?: primaryJson.optCleanString("bannerUrl")
+            ?: primaryJson.optCleanString("background")
+            ?: bannerObj?.optCleanString("extraLarge")
+            ?: bannerObj?.optCleanString("large")
+            ?: bannerObj?.optCleanString("url")
+            ?: artworkObj?.optCleanString("banner")
+            ?: artworkObj?.optCleanString("background")
 
-        val bannerUrl = json.optString("bannerImage").takeNonNull()
-            ?: json.optString("banner").takeNonNull()
-            ?: json.optString("banner_url").takeNonNull()
-            ?: json.optString("bannerUrl").takeNonNull()
-            ?: json.optString("background").takeNonNull()
-            ?: artworkObj?.optString("banner").takeNonNull()
-            ?: artworkObj?.optString("background").takeNonNull()
+        val logoUrl = primaryJson.optCleanString("logo_url")
+            ?: primaryJson.optCleanString("logoUrl")
+            ?: artworkObj?.optCleanString("logo")
 
-        val logoUrl = json.optString("logo_url").takeNonNull()
-            ?: json.optString("logoUrl").takeNonNull()
-            ?: artworkObj?.optString("logo").takeNonNull()
-
-        val description = json.optString("synopsis").takeNonNull()
-            ?: json.optString("description").takeNonNull()
+        val description = primaryJson.optCleanString("synopsis")
+            ?: primaryJson.optCleanString("description")
 
         val cleanDescription = description
             ?.replace(Regex("<[^>]*>"), "")
@@ -101,35 +276,35 @@ object JsonParsers {
             ?.replace("&amp;", "&")
             ?.trim()
 
-        val releaseYear = json.optInt("seasonYear", 0).takeIf { it > 1900 }
-            ?: json.optInt("year", 0).takeIf { it > 1900 }
-            ?: json.optInt("release_year", 0).takeIf { it > 1900 }
-            ?: json.optInt("releaseYear", 0).takeIf { it > 1900 }
-            ?: json.optString("startedAiring").takeNonNull()?.take(4)?.toIntOrNull()
+        val releaseYear = primaryJson.optInt("seasonYear", 0).takeIf { it > 1900 }
+            ?: primaryJson.optInt("year", 0).takeIf { it > 1900 }
+            ?: primaryJson.optInt("release_year", 0).takeIf { it > 1900 }
+            ?: primaryJson.optInt("releaseYear", 0).takeIf { it > 1900 }
+            ?: primaryJson.optCleanString("startedAiring")?.take(4)?.toIntOrNull()
 
-        val season = json.optString("season").takeNonNull()
-        val status = json.optString("status").takeNonNull()
-        val format = json.optString("format").takeNonNull()
-            ?: json.optString("type").takeNonNull()
+        val season = primaryJson.optCleanString("season")
+        val status = primaryJson.optCleanString("status")
+        val format = primaryJson.optCleanString("format")
+            ?: primaryJson.optCleanString("type")
 
-        val totalEpisodes = json.optInt("episodes", 0).takeIf { it > 0 }
-            ?: json.optInt("total_episodes", 0).takeIf { it > 0 }
-            ?: json.optInt("totalEpisodes", 0).takeIf { it > 0 }
-            ?: json.optInt("episodes_count", 0).takeIf { it > 0 }
+        val totalEpisodes = primaryJson.optInt("episodes", 0).takeIf { it > 0 }
+            ?: primaryJson.optInt("total_episodes", 0).takeIf { it > 0 }
+            ?: primaryJson.optInt("totalEpisodes", 0).takeIf { it > 0 }
+            ?: primaryJson.optInt("episodes_count", 0).takeIf { it > 0 }
 
-        val rating = json.optDouble("averageScore", Double.NaN).takeIf { !it.isNaN() && it > 0 }
+        val rating = primaryJson.optDouble("averageScore", Double.NaN).takeIf { !it.isNaN() && it > 0 }
 
         val genres = mutableListOf<String>()
-        val genresArr = json.optJSONArray("genres")
+        val genresArr = primaryJson.optJSONArray("genres")
         if (genresArr != null) {
             for (i in 0 until genresArr.length()) {
                 val item = genresArr.opt(i)
                 when (item) {
-                    is String -> if (item.isNotBlank() && item != "null") genres.add(item)
+                    is String -> item.takeCleanString()?.let { genres.add(it) }
                     is JSONObject -> {
-                        val name = item.optString("name").takeNonNull()
-                            ?: item.optString("label").takeNonNull()
-                            ?: item.optString("title").takeNonNull()
+                        val name = item.optCleanString("name")
+                            ?: item.optCleanString("label")
+                            ?: item.optCleanString("title")
                         if (name != null) genres.add(name)
                     }
                 }
@@ -173,6 +348,7 @@ object JsonParsers {
                 }
                 root.optJSONArray("items")
                     ?: root.optJSONArray("anime")
+                    ?: root.optJSONArray("media")
                     ?: root.optJSONArray("data")
                     ?: root.optJSONArray("results")
                     ?: root.optJSONArray("seasonal")
@@ -180,7 +356,14 @@ object JsonParsers {
                     ?: root.optJSONObject("data")?.let { dataObj ->
                         dataObj.optJSONArray("items")
                             ?: dataObj.optJSONArray("anime")
+                            ?: dataObj.optJSONArray("media")
                             ?: dataObj.optJSONArray("results")
+                            ?: dataObj.optJSONArray("trending")
+                            ?: dataObj.optJSONArray("popular")
+                            ?: dataObj.optJSONArray("seasonal")
+                            ?: dataObj.optJSONArray("upcoming")
+                            ?: dataObj.optJSONArray("recommended")
+                            ?: dataObj.optJSONArray("list")
                     }
             } ?: return emptyList()
 
@@ -202,7 +385,9 @@ object JsonParsers {
         return runCatching {
             val root = JSONObject(rawBody.trim())
             val target = root.optJSONObject("anime")
-                ?: root.optJSONObject("data")
+                ?: root.optJSONObject("data")?.let { dataObj ->
+                    dataObj.optJSONObject("anime") ?: dataObj.optJSONObject("media") ?: dataObj
+                }
                 ?: root.optJSONObject("result")
                 ?: root
             parseHoshikaAnime(target)
@@ -353,8 +538,9 @@ object JsonParsers {
                     ?: obj.optString("episode_id").takeNonNull()
                     ?: obj.optString("sourceId").takeNonNull()
                     ?: "${hoshikaId}_ep_$number"
-                val title = obj.optString("title").takeNonNull()
-                    ?: obj.optString("name").takeNonNull()
+                val title = obj.optCleanString("title")
+                    ?: obj.optCleanString("name")
+                    ?: extractTitles(obj).let { it.english ?: it.romaji ?: it.native }
                 val thumb = obj.optString("thumbnail").takeNonNull()
                     ?: obj.optString("image").takeNonNull()
                     ?: obj.optString("thumbnailUrl").takeNonNull()
@@ -554,18 +740,20 @@ object JsonParsers {
                     continue
                 }
 
-                val candidateTitle = item.optString("title").takeNonNull() ?: ""
-                val normCandidate = normalizeTitleForMatch(candidateTitle)
+                val extracted = extractTitles(item)
+                val candidateTitles = listOfNotNull(extracted.english, extracted.romaji, extracted.native)
+                    .map { normalizeTitleForMatch(it) }
+                    .filter { it.isNotEmpty() }
 
                 var score = 0
                 // Position bias (search engine relevance)
                 score += (10 - i).coerceAtLeast(0) * 3
 
                 // Title match scoring
-                if (normCandidate.isNotEmpty()) {
+                if (candidateTitles.isNotEmpty()) {
                     when {
-                        targetTitles.any { it == normCandidate } -> score += 100
-                        targetTitles.any { it.contains(normCandidate) || normCandidate.contains(it) } -> score += 55
+                        candidateTitles.any { cand -> targetTitles.any { it == cand } } -> score += 100
+                        candidateTitles.any { cand -> targetTitles.any { it.contains(cand) || cand.contains(it) } } -> score += 55
                     }
                 }
 
@@ -847,6 +1035,9 @@ object JsonParsers {
             val introObj = dataObj.optJSONObject("intro") ?: skipObj?.optJSONObject("intro")
             val outroObj = dataObj.optJSONObject("outro") ?: skipObj?.optJSONObject("outro")
 
+            val streamTitle = extractTitles(dataObj).let { it.english ?: it.romaji ?: it.native }
+                ?: extractTitles(root).let { it.english ?: it.romaji ?: it.native }
+
             StreamData(
                 anilistId = anilistId,
                 episodeNumber = episodeNumber,
@@ -857,7 +1048,8 @@ object JsonParsers {
                 introStartSec = introObj?.optDouble("start")?.takeIf { !it.isNaN() }?.toFloat(),
                 introEndSec = introObj?.optDouble("end")?.takeIf { !it.isNaN() && it > 0 }?.toFloat(),
                 outroStartSec = outroObj?.optDouble("start")?.takeIf { !it.isNaN() }?.toFloat(),
-                outroEndSec = outroObj?.optDouble("end")?.takeIf { !it.isNaN() && it > 0 }?.toFloat()
+                outroEndSec = outroObj?.optDouble("end")?.takeIf { !it.isNaN() && it > 0 }?.toFloat(),
+                title = streamTitle
             )
         }.getOrNull()
     }
@@ -902,6 +1094,24 @@ object JsonParsers {
             }
             SkipIntervals(intro = introRange, outro = outroRange)
         }.getOrDefault(SkipIntervals())
+    }
+
+    private fun JSONObject.optCleanString(key: String): String? {
+        if (!has(key) || isNull(key)) return null
+        val raw = opt(key) ?: return null
+        if (raw is JSONObject || raw is JSONArray) return null
+        return raw.toString().takeCleanString()
+    }
+
+    private fun String?.takeCleanString(): String? {
+        val s = this.takeNonNull() ?: return null
+        if (s.equals("undefined", ignoreCase = true)) return null
+        if ((s.startsWith("{") && s.endsWith("}")) ||
+            (s.startsWith("[") && s.endsWith("]"))
+        ) {
+            return null
+        }
+        return s
     }
 
     private fun String?.takeNonNull(): String? {

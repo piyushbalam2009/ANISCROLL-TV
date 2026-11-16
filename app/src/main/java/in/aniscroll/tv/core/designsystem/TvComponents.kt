@@ -79,7 +79,7 @@ fun TvFocusableButton(
     isAccentGreen: Boolean = false,
     enabled: Boolean = true,
     focusRequester: FocusRequester? = null,
-    contentPadding: PaddingValues = PaddingValues(horizontal = 20.dp, vertical = 12.dp)
+    contentPadding: PaddingValues = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
@@ -119,12 +119,12 @@ fun TvFocusableButton(
         modifier = modifier
             .then(focusMod)
             .minimumInteractiveComponentSize()
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(4.dp))
             .background(containerColor)
             .border(
                 width = 1.5.dp,
                 color = borderColor,
-                shape = RoundedCornerShape(6.dp)
+                shape = RoundedCornerShape(4.dp)
             )
             .onKeyEvent { event ->
                 if (enabled && event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN &&
@@ -154,9 +154,9 @@ fun TvFocusableButton(
                 imageVector = icon,
                 contentDescription = text,
                 tint = contentColor,
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier.size(16.dp)
             )
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(6.dp))
         }
         Text(
             text = text,
@@ -196,9 +196,9 @@ fun TvSelectableChip(
     Box(
         modifier = modifier
             .minimumInteractiveComponentSize()
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(4.dp))
             .background(bg)
-            .border(1.5.dp, border, RoundedCornerShape(6.dp))
+            .border(1.5.dp, border, RoundedCornerShape(4.dp))
             .onKeyEvent { event ->
                 if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN &&
                     (event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
@@ -216,7 +216,7 @@ fun TvSelectableChip(
                 indication = null,
                 onClick = onClick
             )
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp, vertical = 7.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -235,7 +235,7 @@ fun TvAnimePosterCard(
     modifier: Modifier = Modifier,
     subtitleBadge: String? = null,
     progressFraction: Float? = null,
-    cardWidth: Dp = 152.dp,
+    cardWidth: Dp = 128.dp,
     focusRequester: FocusRequester? = null,
     onFocused: (() -> Unit)? = null
 ) {
@@ -254,7 +254,7 @@ fun TvAnimePosterCard(
             ImageRequest.Builder(context)
                 .data(url)
                 .crossfade(true)
-                .size(360, 540)
+                .size(320, 480)
                 .build()
         }
     }
@@ -282,18 +282,18 @@ fun TvAnimePosterCard(
                 indication = null,
                 onClick = onClick
             )
-            .padding(4.dp)
+            .padding(2.dp)
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(6.dp))
+                .clip(RoundedCornerShape(4.dp))
                 .background(TvColors.CardBackground)
                 .border(
                     width = 1.5.dp,
                     color = if (isFocused) TvColors.FocusOutline else TvColors.Divider,
-                    shape = RoundedCornerShape(6.dp)
+                    shape = RoundedCornerShape(4.dp)
                 )
         ) {
             if (posterRequest != null) {
@@ -307,7 +307,7 @@ fun TvAnimePosterCard(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(12.dp),
+                        .padding(8.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -315,9 +315,9 @@ fun TvAnimePosterCard(
                             imageVector = Icons.Default.Movie,
                             contentDescription = anime.preferredTitle,
                             tint = TvColors.MutedText,
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier.size(26.dp)
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = anime.preferredTitle,
                             style = MaterialTheme.typography.bodyMedium,
@@ -338,11 +338,11 @@ fun TvAnimePosterCard(
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(6.dp)
-                        .clip(RoundedCornerShape(4.dp))
+                        .padding(4.dp)
+                        .clip(RoundedCornerShape(3.dp))
                         .background(TvColors.MainBackground.copy(alpha = 0.85f))
-                        .border(0.5.dp, TvColors.Divider, RoundedCornerShape(4.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .border(0.5.dp, TvColors.Divider, RoundedCornerShape(3.dp))
+                        .padding(horizontal = 5.dp, vertical = 2.dp)
                 ) {
                     Text(
                         text = badgeText,
@@ -359,20 +359,20 @@ fun TvAnimePosterCard(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .height(3.dp),
+                        .height(2.5.dp),
                     color = TvColors.PrimaryText,
                     trackColor = TvColors.ElevatedSurface
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         Text(
             text = anime.preferredTitle,
             style = MaterialTheme.typography.titleMedium,
-            color = if (isFocused) TvColors.PrimaryText else TvColors.SecondaryText,
-            maxLines = 1,
+            color = if (isFocused) TvColors.PrimaryText else Color(0xFFD9D9D9),
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
 
@@ -507,24 +507,24 @@ fun TvConfirmDialog(
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Surface(
-            shape = RoundedCornerShape(8.dp),
+            shape = RoundedCornerShape(6.dp),
             color = TvColors.SecondaryBackground,
             border = BorderStroke(1.dp, TvColors.Divider),
-            modifier = Modifier.widthIn(min = 320.dp, max = 460.dp)
+            modifier = Modifier.widthIn(min = 280.dp, max = 380.dp)
         ) {
-            Column(modifier = Modifier.padding(24.dp)) {
+            Column(modifier = Modifier.padding(18.dp)) {
                 Text(
                     text = title,
                     style = MaterialTheme.typography.headlineMedium,
                     color = TvColors.PrimaryText
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = message,
                     style = MaterialTheme.typography.bodyLarge,
                     color = TvColors.SecondaryText
                 )
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(18.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End
@@ -534,7 +534,7 @@ fun TvConfirmDialog(
                         onClick = onDismiss,
                         modifier = Modifier.testTag("dialog_cancel_button")
                     )
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
                     TvFocusableButton(
                         text = confirmText,
                         isPrimary = true,

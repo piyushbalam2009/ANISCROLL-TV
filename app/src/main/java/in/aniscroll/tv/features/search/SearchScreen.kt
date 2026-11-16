@@ -569,9 +569,9 @@ fun SearchScreen(
                         }
                         Spacer(modifier = Modifier.height(12.dp))
                         LazyVerticalGrid(
-                            columns = GridCells.Adaptive(minSize = 148.dp),
-                            horizontalArrangement = Arrangement.spacedBy(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(18.dp),
+                            columns = GridCells.Adaptive(minSize = 124.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
                             contentPadding = PaddingValues(bottom = 32.dp),
                             modifier = Modifier
                                 .fillMaxSize()

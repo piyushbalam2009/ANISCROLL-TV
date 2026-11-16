@@ -1,9 +1,11 @@
 package `in`.aniscroll.tv.features.watchorder
 
+import `in`.aniscroll.tv.data.remote.JsonParsers
 import `in`.aniscroll.tv.domain.model.Anime
 import `in`.aniscroll.tv.domain.model.FranchiseRelationCategory
 import `in`.aniscroll.tv.domain.model.FranchiseWatchOrder
 import `in`.aniscroll.tv.domain.model.WatchOrderEntry
+import `in`.aniscroll.tv.domain.model.sanitizeAnimeTitle
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
@@ -33,7 +35,10 @@ data class RawFranchiseMediaNode(
     val relations: List<Pair<String, RawFranchiseMediaNode>> = emptyList()
 ) {
     val preferredTitle: String
-        get() = titleEnglish?.takeIf { it.isNotBlank() } ?: titleRomaji
+        get() = sanitizeAnimeTitle(titleEnglish)
+            ?: sanitizeAnimeTitle(titleRomaji)
+            ?: sanitizeAnimeTitle(titleNative)
+            ?: ""
 }
 
 data class HoshikaRelationStub(
@@ -41,7 +46,9 @@ data class HoshikaRelationStub(
     val shortId: Long,
     val title: String,
     val coverImage: String?,
-    val format: String?
+    val format: String?,
+    val englishTitle: String? = null,
+    val japaneseTitle: String? = null
 )
 
 object WatchOrderGenerator {
@@ -175,14 +182,10 @@ object WatchOrderGenerator {
             99999999
         }
 
-        val titleObj = obj.optJSONObject("title")
-        val romaji = titleObj?.optString("romaji").takeNonNull()
-            ?: titleObj?.optString("english").takeNonNull()
-            ?: titleObj?.optString("native").takeNonNull()
-            ?: obj.optString("title").takeNonNull()
-            ?: return null
-        val english = titleObj?.optString("english").takeNonNull()
-        val nativeTitle = titleObj?.optString("native").takeNonNull()
+        val titles = JsonParsers.extractTitles(obj)
+        val english = titles.english
+        val nativeTitle = titles.native
+        val romaji = titles.romaji ?: english ?: nativeTitle ?: return null
 
         val rawDesc = obj.optString("description").takeNonNull()
         val cleanDesc = rawDesc
@@ -250,10 +253,8 @@ object WatchOrderGenerator {
                         ?: continue
                     val relType = item.optString("relationType").takeNonNull()?.uppercase(Locale.ROOT)
                         ?: "OTHER"
-                    val title = item.optString("title").takeNonNull()
-                        ?: item.optString("titleEnglish").takeNonNull()
-                        ?: item.optString("titleRomaji").takeNonNull()
-                        ?: continue
+                    val titles = JsonParsers.extractTitles(item)
+                    val title = titles.romaji ?: titles.english ?: titles.native ?: continue
                     val coverImage = item.optString("coverImage").takeNonNull()
                         ?: item.optString("poster").takeNonNull()
                     val format = item.optString("format").takeNonNull()?.uppercase(Locale.ROOT)
@@ -263,7 +264,9 @@ object WatchOrderGenerator {
                             shortId = shortId,
                             title = title,
                             coverImage = coverImage,
-                            format = format
+                            format = format,
+                            englishTitle = titles.english,
+                            japaneseTitle = titles.native
                         )
                     )
                 }

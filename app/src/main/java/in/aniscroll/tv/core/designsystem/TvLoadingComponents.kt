@@ -267,7 +267,7 @@ fun TvSectionLoadingHeader(
  */
 @Composable
 fun TvPosterCardSkeleton(
-    cardWidth: Dp = 152.dp,
+    cardWidth: Dp = 128.dp,
     shimmerBrush: Brush = rememberMonochromeShimmerBrush(),
     modifier: Modifier = Modifier
 ) {
@@ -275,17 +275,17 @@ fun TvPosterCardSkeleton(
         modifier = modifier
             .width(cardWidth)
             .focusable(false)
-            .padding(4.dp)
+            .padding(2.dp)
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(6.dp))
+                .clip(RoundedCornerShape(4.dp))
                 .background(shimmerBrush)
-                .border(1.dp, TvColors.Divider, RoundedCornerShape(6.dp))
+                .border(1.dp, TvColors.Divider, RoundedCornerShape(4.dp))
         )
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
         Box(
             modifier = Modifier
                 .fillMaxWidth(0.82f)
@@ -293,7 +293,7 @@ fun TvPosterCardSkeleton(
                 .clip(RoundedCornerShape(3.dp))
                 .background(shimmerBrush)
         )
-        Spacer(modifier = Modifier.height(5.dp))
+        Spacer(modifier = Modifier.height(4.dp))
         Box(
             modifier = Modifier
                 .fillMaxWidth(0.52f)
@@ -311,7 +311,7 @@ fun TvPosterCardSkeleton(
 fun TvAnimeRowSkeleton(
     sectionLabel: String? = null,
     cardsCount: Int = 6,
-    cardWidth: Dp = 152.dp,
+    cardWidth: Dp = 128.dp,
     contentPadding: PaddingValues = PaddingValues(horizontal = 32.dp),
     modifier: Modifier = Modifier
 ) {

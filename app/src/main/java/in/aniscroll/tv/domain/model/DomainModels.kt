@@ -2,6 +2,23 @@ package `in`.aniscroll.tv.domain.model
 
 import kotlinx.coroutines.flow.Flow
 
+fun sanitizeAnimeTitle(raw: String?): String? {
+    if (raw == null) return null
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty() ||
+        trimmed.equals("null", ignoreCase = true) ||
+        trimmed.equals("undefined", ignoreCase = true)
+    ) {
+        return null
+    }
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+        (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+        return null
+    }
+    return trimmed
+}
+
 data class Anime(
     val hoshikaId: Long,
     val anilistId: Long? = null,
@@ -24,7 +41,10 @@ data class Anime(
     val rating: Double? = null
 ) {
     val preferredTitle: String
-        get() = englishTitle?.takeIf { it.isNotBlank() } ?: title
+        get() = sanitizeAnimeTitle(englishTitle)
+            ?: sanitizeAnimeTitle(title)
+            ?: sanitizeAnimeTitle(japaneseTitle)
+            ?: ""
 }
 
 data class Episode(
@@ -90,7 +110,8 @@ data class StreamData(
     val introStartSec: Float? = null,
     val introEndSec: Float? = null,
     val outroStartSec: Float? = null,
-    val outroEndSec: Float? = null
+    val outroEndSec: Float? = null,
+    val title: String? = null
 )
 
 data class TimeRange(
@@ -220,7 +241,10 @@ data class WatchOrderEntry(
     val watchStatusLabel: String? = null
 ) {
     val preferredTitle: String
-        get() = englishTitle?.takeIf { it.isNotBlank() } ?: title
+        get() = sanitizeAnimeTitle(englishTitle)
+            ?: sanitizeAnimeTitle(title)
+            ?: sanitizeAnimeTitle(japaneseTitle)
+            ?: ""
 }
 
 data class FranchiseWatchOrder(

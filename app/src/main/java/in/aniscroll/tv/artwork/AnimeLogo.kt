@@ -13,6 +13,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -62,9 +63,8 @@ object LogoImageLoader {
  * Responsibilities:
  * 1. Displays the supplied transparent PNG/SVG/WEBP logo URL from TMDB or Fanart.tv using [LogoImageLoader].
  * 2. Preserves original image aspect ratio using ContentScale.Fit (never crops or stretches).
- * 3. Reserves a clean loading state height so hero/details layouts never collapse when the logo loads.
- * 4. Displays a crisp white typography text fallback on null/invalid URL or load failure.
- * 5. Notifies [onLogoLoadFailed] when an image URL fails to render so the ViewModel/Repository can
+ * 3. Shows the crisp white typography text fallback immediately while loading, on null/invalid URL, or on load failure.
+ * 4. Notifies [onLogoLoadFailed] when an image URL fails to render so the ViewModel/Repository can
  *    invalidate any bad Room cache entry and retry TMDB -> Fanart.tv -> Text fallback.
  */
 @Composable
@@ -82,10 +82,12 @@ fun AnimeLogo(
         logoUrl?.trim()?.takeIf {
             it.isNotEmpty() &&
                 !it.equals("null", ignoreCase = true) &&
+                !it.equals("undefined", ignoreCase = true) &&
                 (it.startsWith("https://") || it.startsWith("http://"))
         }
     }
 
+    var loadSucceededForCurrentUrl by remember(hoshikaId, cleanUrl) { mutableStateOf(false) }
     var loadFailedForCurrentUrl by remember(hoshikaId, cleanUrl) { mutableStateOf(false) }
     var reportedFailureUrl by remember(hoshikaId, cleanUrl) { mutableStateOf<String?>(null) }
 
@@ -102,12 +104,24 @@ fun AnimeLogo(
         }
     }
 
+    val showingLogoImage = imageRequest != null &&
+        cleanUrl != null &&
+        !loadFailedForCurrentUrl &&
+        loadSucceededForCurrentUrl
+
+    val containerModifier = modifier
+        .widthIn(max = maxWidth)
+        .let { base ->
+            if (showingLogoImage) {
+                base.heightIn(min = 40.dp, max = maxHeight).clipToBounds()
+            } else {
+                base.heightIn(min = 40.dp)
+            }
+        }
+        .testTag("anime_logo_container_$hoshikaId")
+
     Box(
-        modifier = modifier
-            .widthIn(max = maxWidth)
-            .heightIn(min = 40.dp, max = maxHeight)
-            .clipToBounds()
-            .testTag("anime_logo_container_$hoshikaId"),
+        modifier = containerModifier,
         contentAlignment = Alignment.CenterStart
     ) {
         if (imageRequest != null && cleanUrl != null && !loadFailedForCurrentUrl) {
@@ -120,15 +134,29 @@ fun AnimeLogo(
                 onState = { state ->
                     when (state) {
                         is AsyncImagePainter.State.Success -> {
-                            LogoLogger.d(
-                                "HoshikaID=$hoshikaId title='$animeTitle' -> Image load SUCCESS host=${LogoLogger.extractHost(cleanUrl)}"
-                            )
+                            val drawable = state.result.drawable
+                            val validSize = drawable.intrinsicWidth == -1 ||
+                                (drawable.intrinsicWidth > 1 && drawable.intrinsicHeight > 1)
+                            if (validSize) {
+                                loadSucceededForCurrentUrl = true
+                                LogoLogger.d(
+                                    "HoshikaID=$hoshikaId title='$animeTitle' -> Image load SUCCESS host=${LogoLogger.extractHost(cleanUrl)}"
+                                )
+                            } else {
+                                loadSucceededForCurrentUrl = false
+                                loadFailedForCurrentUrl = true
+                                if (reportedFailureUrl != cleanUrl) {
+                                    reportedFailureUrl = cleanUrl
+                                    onLogoLoadFailed?.invoke(cleanUrl)
+                                }
+                            }
                         }
                         is AsyncImagePainter.State.Error -> {
                             LogoLogger.w(
                                 "HoshikaID=$hoshikaId title='$animeTitle' -> Image load FAILED host=${LogoLogger.extractHost(cleanUrl)}: ${state.result.throwable.message}",
                                 state.result.throwable
                             )
+                            loadSucceededForCurrentUrl = false
                             loadFailedForCurrentUrl = true
                             if (reportedFailureUrl != cleanUrl) {
                                 reportedFailureUrl = cleanUrl
@@ -141,9 +169,12 @@ fun AnimeLogo(
                 modifier = Modifier
                     .widthIn(max = maxWidth)
                     .heightIn(max = maxHeight)
+                    .alpha(if (showingLogoImage) 1f else 0f)
                     .testTag("anime_logo_image_$hoshikaId")
             )
-        } else {
+        }
+
+        if (!showingLogoImage) {
             Text(
                 text = animeTitle,
                 style = MaterialTheme.typography.headlineLarge.copy(fontWeight = FontWeight.Bold),

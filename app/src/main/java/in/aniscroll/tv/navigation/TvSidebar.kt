@@ -63,6 +63,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import `in`.aniscroll.tv.core.designsystem.TvColors
 
+import androidx.compose.runtime.saveable.rememberSaveable
+
 enum class TvDestination(
     val route: String,
     val label: String,
@@ -84,10 +86,10 @@ fun TvNavigationSidebar(
     onSelectDestination: (TvDestination) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var isSidebarExpanded by remember { mutableStateOf(false) }
+    var isSidebarExpanded by rememberSaveable { mutableStateOf(false) }
 
     val sidebarWidth by animateDpAsState(
-        targetValue = if (isSidebarExpanded) 224.dp else 68.dp,
+        targetValue = if (isSidebarExpanded) 188.dp else 56.dp,
         animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
         label = "sidebar_width"
     )
@@ -98,29 +100,60 @@ fun TvNavigationSidebar(
             .fillMaxHeight()
             .background(TvColors.MainBackground)
             .border(width = 0.5.dp, color = TvColors.Divider)
-            .onFocusChanged { focusState ->
-                isSidebarExpanded = focusState.hasFocus
-            }
-            .padding(vertical = 20.dp, horizontal = 10.dp),
+            .padding(vertical = 14.dp, horizontal = 8.dp),
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // Brand Header
+        // Brand Header / Toggle Button
+        val headerInteractionSource = remember { MutableInteractionSource() }
+        val isHeaderFocused by headerInteractionSource.collectIsFocusedAsState()
+        val headerBg by animateColorAsState(
+            targetValue = if (isHeaderFocused) TvColors.FocusBackground else Color.Transparent,
+            label = "header_bg"
+        )
+        val headerFg = if (isHeaderFocused) TvColors.FocusText else TvColors.PrimaryText
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .clip(RoundedCornerShape(4.dp))
+                .background(headerBg)
+                .border(
+                    width = if (isHeaderFocused) 1.5.dp else 0.dp,
+                    color = if (isHeaderFocused) TvColors.FocusOutline else Color.Transparent,
+                    shape = RoundedCornerShape(4.dp)
+                )
+                .onKeyEvent { event ->
+                    if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN &&
+                        (event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                            event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_ENTER ||
+                            event.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER)
+                    ) {
+                        isSidebarExpanded = !isSidebarExpanded
+                        true
+                    } else {
+                        false
+                    }
+                }
+                .focusable(interactionSource = headerInteractionSource)
+                .clickable(
+                    interactionSource = headerInteractionSource,
+                    indication = null,
+                    onClick = { isSidebarExpanded = !isSidebarExpanded }
+                )
+                .padding(horizontal = 6.dp, vertical = 4.dp)
+                .testTag("sidebar_brand_header"),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(32.dp)
-                    .clip(RoundedCornerShape(6.dp))
+                    .size(26.dp)
+                    .clip(RoundedCornerShape(4.dp))
                     .background(TvColors.ElevatedSurface)
-                    .border(0.5.dp, TvColors.Divider, RoundedCornerShape(6.dp)),
+                    .border(0.5.dp, TvColors.Divider, RoundedCornerShape(4.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 `in`.aniscroll.tv.core.designsystem.AniScrollBrandLogo(
-                    size = 22.dp,
+                    size = 18.dp,
                     contentDescription = "AniScroll Logo"
                 )
             }
@@ -130,11 +163,11 @@ fun TvNavigationSidebar(
                 exit = fadeOut()
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
                     Text(
                         text = "ANISCROLL TV",
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = TvColors.PrimaryText,
+                        color = headerFg,
                         maxLines = 1
                     )
                 }
@@ -144,7 +177,7 @@ fun TvNavigationSidebar(
         // Main Nav Items
         Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             TvDestination.entries.forEach { dest ->
                 TvSidebarItem(
@@ -160,7 +193,7 @@ fun TvNavigationSidebar(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp),
+                .padding(horizontal = 6.dp),
             contentAlignment = Alignment.CenterStart
         ) {
             if (isSidebarExpanded) {
@@ -207,12 +240,12 @@ private fun TvSidebarItem(
         modifier = Modifier
             .fillMaxWidth()
             .minimumInteractiveComponentSize()
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(4.dp))
             .background(bgColor)
             .border(
                 width = if (isFocused) 2.dp else if (isSelected) 1.dp else 0.dp,
                 color = if (isFocused) TvColors.FocusOutline else if (isSelected) TvColors.Divider else Color.Transparent,
-                shape = RoundedCornerShape(6.dp)
+                shape = RoundedCornerShape(4.dp)
             )
             .onKeyEvent { event ->
                 if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN &&
@@ -231,7 +264,7 @@ private fun TvSidebarItem(
                 indication = null,
                 onClick = onClick
             )
-            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .padding(horizontal = 10.dp, vertical = 6.dp)
             .testTag("nav_${destination.route}"),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -239,7 +272,7 @@ private fun TvSidebarItem(
             imageVector = if (isSelected || isFocused) destination.selectedIcon else destination.unselectedIcon,
             contentDescription = destination.label,
             tint = contentColor,
-            modifier = Modifier.size(22.dp)
+            modifier = Modifier.size(18.dp)
         )
         AnimatedVisibility(
             visible = isExpanded,
@@ -247,7 +280,7 @@ private fun TvSidebarItem(
             exit = fadeOut()
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Spacer(modifier = Modifier.width(14.dp))
+                Spacer(modifier = Modifier.width(10.dp))
                 Text(
                     text = destination.label,
                     style = MaterialTheme.typography.titleMedium,

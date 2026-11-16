@@ -527,11 +527,22 @@ class PlaybackController(
                 )
                 val speed = _uiState.value.playbackSpeed
 
+                val streamTitle = `in`.aniscroll.tv.domain.model.sanitizeAnimeTitle(streamData.title)
+                val updatedAnime = if (streamTitle != null && (anime.preferredTitle.isBlank() || anime.preferredTitle.startsWith("Anime #"))) {
+                    anime.copy(
+                        title = anime.title.takeIf { it.isNotBlank() } ?: streamTitle,
+                        englishTitle = anime.englishTitle ?: streamTitle
+                    )
+                } else {
+                    anime
+                }
+
                 _progressState.update { it.copy(currentPositionMs = startPos) }
                 _uiState.update {
                     it.copy(
                         isLoading = false,
                         errorMessage = null,
+                        anime = updatedAnime,
                         audioLanguage = language,
                         availableQualities = qualities,
                         selectedQualityLabel = chosenSource.quality,
