@@ -119,12 +119,11 @@ class HoshikaIdConverter(
             }
         }
 
-        // 3. Ensure we have full Hoshika details (English/Romaji titles, episodes, format, malId)
-        val detailedAnime = if (
-            anime.englishTitle.isNullOrBlank() ||
-            anime.format.isNullOrBlank() ||
-            anime.totalEpisodes == null
-        ) {
+        // 3. Ensure we have enough Hoshika metadata (at least one usable title + format) without unnecessary network roundtrips
+        val hasUsableTitle = !anime.englishTitle.isNullOrBlank() ||
+            anime.title.isNotBlank() ||
+            !anime.japaneseTitle.isNullOrBlank()
+        val detailedAnime = if (!hasUsableTitle || anime.format.isNullOrBlank()) {
             fetchHoshikaAnimeDetails(hoshikaId) ?: anime
         } else {
             anime

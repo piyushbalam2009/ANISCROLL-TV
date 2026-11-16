@@ -13,6 +13,7 @@ import `in`.aniscroll.tv.domain.model.StreamData
 import `in`.aniscroll.tv.domain.model.TimeRange
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 
@@ -49,8 +50,8 @@ class PlaybackRepository(
 
     companion object {
         private const val COMPLETION_THRESHOLD = 0.90f
-        // Short-lived cache (90s) avoids duplicate watch requests without keeping expiring CDN tokens stale
-        private const val STREAM_CACHE_TTL_MS = 90_000L
+        // Short-lived cache (180s) keeps prewarmed detail-page and next-episode streams warm without keeping expiring CDN tokens stale
+        private const val STREAM_CACHE_TTL_MS = 180_000L
 
         /**
          * Delegates to [StreamingSourceResolver.resolveSource] to select the mandatory provider:
@@ -72,13 +73,49 @@ class PlaybackRepository(
         }
     }
 
+    fun hasFreshCachedStream(
+        format: String?,
+        anilistId: Long,
+        episodeNumber: Int,
+        language: String
+    ): Boolean {
+        if (anilistId <= 0L) return false
+        val normalizedLang = if (language.equals("dub", ignoreCase = true)) "dub" else "sub"
+        val provider = StreamingSourceResolver.resolveSource(format)
+        val targetEpisode = StreamingSourceResolver.resolveEpisodeNumber(format, episodeNumber)
+        val cacheKey = "${provider.sourceId}:$anilistId:$targetEpisode:$normalizedLang"
+        val cached = shortLivedStreamCache[cacheKey] ?: return false
+        return (SystemClock.elapsedRealtime() - cached.cachedAtElapsedMs) < STREAM_CACHE_TTL_MS
+    }
+
+    /**
+     * Pre-resolves the AniList ID and pre-warms the stream metadata in [shortLivedStreamCache]
+     * without downloading video segments, so pressing Play on the detail page or advancing to
+     * the next episode resolves in 0ms.
+     */
+    suspend fun prewarmEpisodeStream(
+        anime: Anime,
+        episodeNumber: Int,
+        language: String = "sub"
+    ): StreamLoadResult = withContext(Dispatchers.IO) {
+        `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+            "prewarm_stream_start hoshika_id=${anime.hoshikaId} ep=$episodeNumber lang=$language"
+        )
+        resolveEpisodeStream(
+            anime = anime,
+            episodeNumber = episodeNumber,
+            language = language,
+            forceRefresh = false
+        )
+    }
+
     /**
      * Fast-start playback resolution flow:
-     * 1. Convert Hoshika ID -> AniList ID and resolve anime format using HoshikaIdConverter.
+     * 1. Convert Hoshika ID -> AniList ID and resolve anime format using HoshikaIdConverter while concurrently querying Room for saved progress.
      * 2. Select the streaming provider via [StreamingSourceResolver] BEFORE making the API request:
      *    - MOVIE -> GET https://anivault-scraper-five.vercel.app/api/watch/zokoanime/{anilist_id}/{episode}/{sub|dub}
      *    - Series -> GET https://anivault-scraper-five.vercel.app/api/watch/megaplay/{anilist_id}/{episode}/{sub|dub}
-     * 3. Deduplicate concurrent in-flight requests and reuse short-lived (90s) cached stream data when valid.
+     * 3. Deduplicate concurrent in-flight requests and reuse short-lived (180s) cached stream data when valid.
      * 4. Extract embedded skip intervals immediately and do NOT block stream startup on external AniSkip HTTP calls.
      * 5. Retrieve saved playback progress from Room.
      */
@@ -89,6 +126,10 @@ class PlaybackRepository(
         forceRefresh: Boolean = false
     ): StreamLoadResult = withContext(Dispatchers.IO) {
         val normalizedLang = if (language.equals("dub", ignoreCase = true)) "dub" else "sub"
+        val preliminaryEpisode = StreamingSourceResolver.resolveEpisodeNumber(anime.format, episodeNumber)
+        val preliminaryProgressDeferred = async {
+            dao.getEpisodeProgress(anime.hoshikaId, preliminaryEpisode)
+        }
 
         // Step 1: Convert Hoshika ID -> AniList ID and resolve format metadata
         val resolveStartMs = SystemClock.elapsedRealtime()
@@ -97,6 +138,7 @@ class PlaybackRepository(
         val anilistId = resolvedTarget?.anilistId
 
         if (anilistId == null || anilistId <= 0L) {
+            preliminaryProgressDeferred.cancel()
             return@withContext StreamLoadResult.Error("Unable to find a compatible streaming ID for this anime.")
         }
 
@@ -106,18 +148,27 @@ class PlaybackRepository(
         val targetEpisode = StreamingSourceResolver.resolveEpisodeNumber(effectiveFormat, episodeNumber)
         val cacheKey = "${provider.sourceId}:$anilistId:$targetEpisode:$normalizedLang"
 
+        suspend fun awaitResumePositionMs(): Long {
+            val savedHistory = if (targetEpisode == preliminaryEpisode) {
+                preliminaryProgressDeferred.await()
+            } else {
+                preliminaryProgressDeferred.cancel()
+                dao.getEpisodeProgress(anime.hoshikaId, targetEpisode)
+            }
+            return if (savedHistory != null && !savedHistory.completed) {
+                savedHistory.position
+            } else {
+                0L
+            }
+        }
+
         if (forceRefresh) {
             shortLivedStreamCache.remove(cacheKey)
         } else {
             val nowElapsed = SystemClock.elapsedRealtime()
             val cached = shortLivedStreamCache[cacheKey]
             if (cached != null && (nowElapsed - cached.cachedAtElapsedMs) < STREAM_CACHE_TTL_MS) {
-                val savedHistory = dao.getEpisodeProgress(anime.hoshikaId, targetEpisode)
-                val resumePositionMs = if (savedHistory != null && !savedHistory.completed) {
-                    savedHistory.position
-                } else {
-                    0L
-                }
+                val resumePositionMs = awaitResumePositionMs()
                 return@withContext StreamLoadResult.Success(
                     streamData = cached.streamData,
                     skipIntervals = extractEmbeddedSkipIntervals(cached.streamData),
@@ -137,12 +188,7 @@ class PlaybackRepository(
             val sharedStream = runCatching { existingDeferred.await() }.getOrNull()
             val awaitedMs = (SystemClock.elapsedRealtime() - awaitedStart).coerceAtLeast(0L)
             if (sharedStream != null) {
-                val savedHistory = dao.getEpisodeProgress(anime.hoshikaId, targetEpisode)
-                val resumePositionMs = if (savedHistory != null && !savedHistory.completed) {
-                    savedHistory.position
-                } else {
-                    0L
-                }
+                val resumePositionMs = awaitResumePositionMs()
                 return@withContext StreamLoadResult.Success(
                     streamData = sharedStream,
                     skipIntervals = extractEmbeddedSkipIntervals(sharedStream),
@@ -169,6 +215,7 @@ class PlaybackRepository(
                 )
             }.getOrElse {
                 deferred.complete(null)
+                preliminaryProgressDeferred.cancel()
                 return@withContext StreamLoadResult.Error(
                     userMessage = "Unable to connect. Check your internet connection.",
                     provider = provider
@@ -178,6 +225,7 @@ class PlaybackRepository(
 
             if (!response.isSuccessful) {
                 deferred.complete(null)
+                preliminaryProgressDeferred.cancel()
                 val code = response.code()
                 val msg = when {
                     normalizedLang == "dub" && code == 404 ->
@@ -203,6 +251,7 @@ class PlaybackRepository(
             val rawBody = response.body()?.string()
             if (rawBody.isNullOrBlank()) {
                 deferred.complete(null)
+                preliminaryProgressDeferred.cancel()
                 return@withContext StreamLoadResult.Error(
                     userMessage = "No playable streaming source was found.",
                     provider = provider
@@ -217,6 +266,7 @@ class PlaybackRepository(
             )
             if (rawStreamData == null) {
                 deferred.complete(null)
+                preliminaryProgressDeferred.cancel()
                 return@withContext StreamLoadResult.Error(
                     userMessage = if (normalizedLang == "dub") {
                         "No DUB streaming source is available for this title."
@@ -246,13 +296,8 @@ class PlaybackRepository(
             // Extract embedded skip intervals immediately; external AniSkip v2 is fetched non-blockingly by PlaybackController
             val initialSkipIntervals = extractEmbeddedSkipIntervals(streamData)
 
-            // Check saved playback position in Room
-            val savedHistory = dao.getEpisodeProgress(anime.hoshikaId, targetEpisode)
-            val resumePositionMs = if (savedHistory != null && !savedHistory.completed) {
-                savedHistory.position
-            } else {
-                0L
-            }
+            // Await concurrently-fetched saved playback position from Room
+            val resumePositionMs = awaitResumePositionMs()
 
             return@withContext StreamLoadResult.Success(
                 streamData = streamData,

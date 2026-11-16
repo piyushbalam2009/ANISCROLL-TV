@@ -67,13 +67,13 @@ object NetworkModule {
      * stay warm and concurrent segment loads never bottleneck behind a 5-per-host limit.
      */
     private val sharedConnectionPool: ConnectionPool by lazy {
-        ConnectionPool(maxIdleConnections = 16, keepAliveDuration = 5, TimeUnit.MINUTES)
+        ConnectionPool(maxIdleConnections = 20, keepAliveDuration = 5, TimeUnit.MINUTES)
     }
 
     private val sharedDispatcher: Dispatcher by lazy {
         Dispatcher().apply {
             maxRequests = 64
-            maxRequestsPerHost = 12
+            maxRequestsPerHost = 16
         }
     }
 
@@ -106,9 +106,9 @@ object NetworkModule {
             .followRedirects(true)
             .followSslRedirects(true)
             .retryOnConnectionFailure(true)
-            .connectTimeout(12, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .writeTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(12, TimeUnit.SECONDS)
             .addInterceptor { chain ->
                 val original = chain.request()
                 val host = original.url.host.lowercase()
@@ -160,7 +160,7 @@ object NetworkModule {
 
                 chain.proceed(builder.build())
             }
-            .addInterceptor(BoundedRetryInterceptor(maxRetries = 1))
+            .addInterceptor(BoundedRetryInterceptor(maxRetries = 1, initialDelayMs = 150L))
             .build()
     }
 
@@ -176,10 +176,10 @@ object NetworkModule {
             .followRedirects(true)
             .followSslRedirects(true)
             .retryOnConnectionFailure(true)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(25, TimeUnit.SECONDS)
-            .writeTimeout(15, TimeUnit.SECONDS)
-            .addInterceptor(BoundedRetryInterceptor(maxRetries = 2, initialDelayMs = 150L))
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .writeTimeout(12, TimeUnit.SECONDS)
+            .addInterceptor(BoundedRetryInterceptor(maxRetries = 2, initialDelayMs = 120L))
             .build()
     }
 

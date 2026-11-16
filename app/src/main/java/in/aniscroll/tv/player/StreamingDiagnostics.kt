@@ -16,7 +16,13 @@ data class StreamingSessionMetrics(
     val apiRequestDurationMs: Long? = null,
     val timeToPlayableUrlMs: Long? = null,
     val hlsManifestLoadDurationMs: Long? = null,
+    val firstSegmentLoadDurationMs: Long? = null,
+    val timeToFirstSegmentMs: Long? = null,
+    val playerPreparationStartElapsedMs: Long? = null,
+    val playerPreparationDurationMs: Long? = null,
+    val decoderInitDurationMs: Long? = null,
     val timeToFirstFrameMs: Long? = null,
+    val totalStartupDurationMs: Long? = null,
     val episodeSwitchDurationMs: Long? = null,
     val bufferingDurationMs: Long = 0L,
     val rebufferCount: Int = 0,
@@ -107,6 +113,35 @@ object StreamingDiagnostics {
         return updated
     }
 
+    fun recordPlayerPreparationStarted(
+        session: StreamingSessionMetrics
+    ): StreamingSessionMetrics {
+        val prepStartMs = SystemClock.elapsedRealtime()
+        val updated = session.copy(playerPreparationStartElapsedMs = prepStartMs)
+        latestMetrics = updated
+        logInfo(
+            "player_preparation_start id=${updated.sessionId} elapsed_since_play_ms=${(prepStartMs - session.playRequestStartElapsedMs).coerceAtLeast(0L)}"
+        )
+        return updated
+    }
+
+    fun recordPlayerPrepared(
+        session: StreamingSessionMetrics,
+        preparationDurationMs: Long? = null
+    ): StreamingSessionMetrics {
+        if (session.playerPreparationDurationMs != null) return session
+        val now = SystemClock.elapsedRealtime()
+        val computedPrepMs = preparationDurationMs
+            ?: session.playerPreparationStartElapsedMs?.let { (now - it).coerceAtLeast(0L) }
+            ?: (now - session.playRequestStartElapsedMs).coerceAtLeast(0L)
+        val updated = session.copy(playerPreparationDurationMs = computedPrepMs)
+        latestMetrics = updated
+        logInfo(
+            "player_prepared id=${updated.sessionId} preparation_duration_ms=$computedPrepMs"
+        )
+        return updated
+    }
+
     fun recordHlsManifestLoaded(
         session: StreamingSessionMetrics,
         manifestLoadDurationMs: Long
@@ -119,17 +154,44 @@ object StreamingDiagnostics {
         return updated
     }
 
+    fun recordFirstSegmentLoaded(
+        session: StreamingSessionMetrics,
+        segmentLoadDurationMs: Long
+    ): StreamingSessionMetrics {
+        if (session.firstSegmentLoadDurationMs != null) return session
+        val timeToFirstSegMs = (SystemClock.elapsedRealtime() - session.playRequestStartElapsedMs).coerceAtLeast(0L)
+        val updated = session.copy(
+            firstSegmentLoadDurationMs = segmentLoadDurationMs.coerceAtLeast(0L),
+            timeToFirstSegmentMs = timeToFirstSegMs
+        )
+        latestMetrics = updated
+        logInfo(
+            "first_segment_loaded id=${updated.sessionId} segment_load_duration_ms=${updated.firstSegmentLoadDurationMs} " +
+                "time_to_first_segment_ms=$timeToFirstSegMs"
+        )
+        return updated
+    }
+
     fun recordFirstFrameRendered(session: StreamingSessionMetrics): StreamingSessionMetrics {
         if (session.timeToFirstFrameMs != null) return session
         val ttffMs = (SystemClock.elapsedRealtime() - session.playRequestStartElapsedMs).coerceAtLeast(0L)
         val switchMs = if (session.isEpisodeSwitch) ttffMs else null
         val updated = session.copy(
             timeToFirstFrameMs = ttffMs,
+            totalStartupDurationMs = ttffMs,
             episodeSwitchDurationMs = switchMs
         )
         latestMetrics = updated
         logInfo(
-            "first_frame_rendered id=${updated.sessionId} time_to_first_frame_ms=$ttffMs" +
+            "first_frame_rendered id=${updated.sessionId} time_to_first_frame_ms=$ttffMs " +
+                "total_startup_ms=$ttffMs " +
+                "server_res_ms=${updated.serverResolutionDurationMs ?: -1} " +
+                "api_req_ms=${updated.apiRequestDurationMs ?: -1} " +
+                "url_ready_ms=${updated.timeToPlayableUrlMs ?: -1} " +
+                "manifest_ms=${updated.hlsManifestLoadDurationMs ?: -1} " +
+                "first_seg_ms=${updated.firstSegmentLoadDurationMs ?: -1} " +
+                "player_prep_ms=${updated.playerPreparationDurationMs ?: -1} " +
+                "decoder_init_ms=${updated.decoderInitDurationMs ?: -1}" +
                 (switchMs?.let { " episode_switch_duration_ms=$it" } ?: "")
         )
         return updated
@@ -186,7 +248,10 @@ object StreamingDiagnostics {
         decoderName: String,
         initDurationMs: Long
     ): StreamingSessionMetrics {
-        val updated = session.copy(activeDecoderName = decoderName)
+        val updated = session.copy(
+            activeDecoderName = decoderName,
+            decoderInitDurationMs = initDurationMs.coerceAtLeast(0L)
+        )
         latestMetrics = updated
         logInfo(
             "video_decoder_init id=${updated.sessionId} decoder=$decoderName init_duration_ms=$initDurationMs"
