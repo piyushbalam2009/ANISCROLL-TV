@@ -544,9 +544,10 @@ object JsonParsers {
                 val title = obj.optCleanString("title")
                     ?: obj.optCleanString("name")
                     ?: extractTitles(obj).let { it.english ?: it.romaji ?: it.native }
-                val thumb = obj.optString("thumbnail").takeNonNull()
+                val rawThumb = obj.optString("thumbnail").takeNonNull()
                     ?: obj.optString("image").takeNonNull()
                     ?: obj.optString("thumbnailUrl").takeNonNull()
+                val thumb = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(rawThumb) ?: rawThumb
                 val desc = obj.optString("synopsis").takeNonNull()
                     ?: obj.optString("description").takeNonNull()
                 val duration = obj.optInt("duration", 0).takeIf { it > 0 }

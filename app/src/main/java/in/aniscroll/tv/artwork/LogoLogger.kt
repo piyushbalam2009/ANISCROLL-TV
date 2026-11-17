@@ -101,16 +101,10 @@ object LogoLogger {
 
         val withScheme = when {
             trimmed.startsWith("//") -> "https:$trimmed"
-            trimmed.startsWith("http://", ignoreCase = true) -> {
-                val host = extractHost(trimmed).lowercase(Locale.ROOT)
-                if (HTTPS_UPGRADE_HOSTS.any { host == it || host.endsWith(".$it") }) {
-                    "https://${trimmed.substring(7)}"
-                } else {
-                    trimmed
-                }
-            }
+            trimmed.startsWith("http://", ignoreCase = true) -> "https://${trimmed.substring(7)}"
             trimmed.startsWith("https://", ignoreCase = true) -> trimmed
-            else -> return null
+            trimmed.contains("://") -> trimmed
+            else -> trimmed
         }
 
         return withScheme.replace(" ", "%20")
