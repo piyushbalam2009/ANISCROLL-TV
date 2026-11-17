@@ -2517,6 +2517,370 @@ class PlayerAndSearchRobolectricTest {
         }
     }
 
+    @Test
+    fun audioTrackManager_selectsEnglishForDubAndJapaneseForSub_onOvergearedMultiAudioTracks() {
+        val exoManager = ExoPlayerManager(context)
+        val audioManager = exoManager.audioTrackManager
+        try {
+            val player = exoManager.getOrCreatePlayer()
+
+            val jaFormat = androidx.media3.common.Format.Builder()
+                .setId("aac:Japanese")
+                .setLabel("Japanese")
+                .setLanguage("ja")
+                .setSampleMimeType(androidx.media3.common.MimeTypes.AUDIO_AAC)
+                .setChannelCount(2)
+                .setSelectionFlags(androidx.media3.common.C.SELECTION_FLAG_DEFAULT or androidx.media3.common.C.SELECTION_FLAG_AUTOSELECT)
+                .build()
+            val enFormat = androidx.media3.common.Format.Builder()
+                .setId("aac:English")
+                .setLabel("English")
+                .setLanguage("en")
+                .setSampleMimeType(androidx.media3.common.MimeTypes.AUDIO_AAC)
+                .setChannelCount(2)
+                .setSelectionFlags(0) // HLS DEFAULT=NO, AUTOSELECT=NO
+                .build()
+            val esFormat = androidx.media3.common.Format.Builder()
+                .setId("aac:Spanish")
+                .setLabel("Spanish")
+                .setLanguage("es")
+                .setSampleMimeType(androidx.media3.common.MimeTypes.AUDIO_AAC)
+                .setChannelCount(2)
+                .setSelectionFlags(0)
+                .build()
+
+            val audioTrackGroup = androidx.media3.common.TrackGroup("aac", jaFormat, enFormat, esFormat)
+            val support = intArrayOf(
+                androidx.media3.common.C.FORMAT_HANDLED,
+                androidx.media3.common.C.FORMAT_HANDLED,
+                androidx.media3.common.C.FORMAT_HANDLED
+            )
+
+            // Simulate initial Media3 discovery where HLS DEFAULT=YES caused Japanese (index 0) to be selected
+            val initialTracksJaSelected = androidx.media3.common.Tracks(
+                listOf(
+                    androidx.media3.common.Tracks.Group(
+                        audioTrackGroup,
+                        false,
+                        support,
+                        booleanArrayOf(true, false, false)
+                    )
+                )
+            )
+
+            // 1. Configure for DUB -> clears old overrides and sets English preferred languages
+            audioManager.configureAudioTrackParameters(player, "dub")
+            assertEquals(listOf("en", "en-us", "en-gb"), player.trackSelectionParameters.preferredAudioLanguages)
+            assertFalse(player.trackSelectionParameters.disabledTrackTypes.contains(androidx.media3.common.C.TRACK_TYPE_AUDIO))
+
+            // 2. Inspect discovered tracks while Japanese is selected -> must install explicit TrackSelectionOverride to index 1 (English)
+            audioManager.inspectAndEnsureAudioSelection(player, initialTracksJaSelected, "dub")
+            val dubOverride = player.trackSelectionParameters.overrides[audioTrackGroup]
+            assertNotNull("Expected explicit TrackSelectionOverride to English track", dubOverride)
+            assertEquals(listOf(1), dubOverride!!.trackIndices)
+
+            // 3. Switch to SUB while English was selected -> configures Japanese preference & overrides back to index 0 (Japanese)
+            audioManager.configureAudioTrackParameters(player, "sub")
+            assertEquals(listOf("ja", "ja-jp"), player.trackSelectionParameters.preferredAudioLanguages)
+            assertNull("Old audio override must be cleared before preparing SUB", player.trackSelectionParameters.overrides[audioTrackGroup])
+
+            val tracksEnSelected = androidx.media3.common.Tracks(
+                listOf(
+                    androidx.media3.common.Tracks.Group(
+                        audioTrackGroup,
+                        false,
+                        support,
+                        booleanArrayOf(false, true, false)
+                    )
+                )
+            )
+            audioManager.inspectAndEnsureAudioSelection(player, tracksEnSelected, "sub")
+            val subOverride = player.trackSelectionParameters.overrides[audioTrackGroup]
+            assertNotNull("Expected TrackSelectionOverride back to Japanese track", subOverride)
+            assertEquals(listOf(0), subOverride!!.trackIndices)
+
+            // 4. Single-track stream with no English rendition must NOT blindly force a non-existent override
+            val singleTrackGroup = androidx.media3.common.TrackGroup("aac-single", jaFormat)
+            val singleTrackOnly = androidx.media3.common.Tracks(
+                listOf(
+                    androidx.media3.common.Tracks.Group(
+                        singleTrackGroup,
+                        false,
+                        intArrayOf(androidx.media3.common.C.FORMAT_HANDLED),
+                        booleanArrayOf(true)
+                    )
+                )
+            )
+            audioManager.configureAudioTrackParameters(player, "dub")
+            audioManager.inspectAndEnsureAudioSelection(player, singleTrackOnly, "dub")
+            assertTrue(
+                "Must not add invalid override when no English rendition exists",
+                player.trackSelectionParameters.overrides.isEmpty()
+            )
+        } finally {
+            exoManager.releasePlayer()
+        }
+    }
+
+    @Test
+    fun playbackRepository_isolatesSubAndDubCacheKeys_andRespectsSignedUrlExpiration() = runTest {
+        val overgearedWatchCalls = mutableListOf<String>()
+        val fakeAniScroll = object : AniScrollApi {
+            override suspend fun getWatchStreams(source: String, anilistId: Long, episode: Int, language: String): Response<ResponseBody> {
+                val route = "/api/watch/$source/$anilistId/$episode/$language"
+                overgearedWatchCalls.add(route)
+                val body = """
+                    {
+                      "anilistId": $anilistId,
+                      "malId": 64340,
+                      "title": "Overgeared",
+                      "episode": $episode,
+                      "type": "$language",
+                      "source": "megaplay",
+                      "server": "MegaPlay Direct",
+                      "embedUrl": "https://megaplay.buzz/",
+                      "m3u8": "https://fetch.nexabloom.top/anime/overgeared/master.m3u8?exp=9999999999",
+                      "hlsProxyUrl": "https://anivault-scraper-five.vercel.app/api/proxy/hls?url=https%3A%2F%2Ffetch.nexabloom.top%2Fanime%2Fovergeared%2Fmaster.m3u8&ref=https%3A%2F%2Fmegaplay.buzz%2F",
+                      "playbackMode": "hls",
+                      "iframeOnly": false
+                    }
+                """.trimIndent()
+                return Response.success(body.toResponseBody("application/json".toMediaType()))
+            }
+
+            override suspend fun getZokoAnimeStreams(anilistId: Long, episode: Int, language: String) =
+                getWatchStreams("zokoanime", anilistId, episode, language)
+
+            override suspend fun getMegaPlayStreams(anilistId: Long, episode: Int, language: String) =
+                getWatchStreams("megaplay", anilistId, episode, language)
+
+            override suspend fun searchAnimeIds(query: String, limit: Int) =
+                Response.error<ResponseBody>(404, "".toResponseBody(null))
+
+            override suspend fun getAniListIdFromMal(malId: Long) =
+                Response.error<ResponseBody>(404, "".toResponseBody(null))
+
+            override suspend fun getHoshikaProxy(path: String, query: String?, page: Int?, genre: String?, day: String?) =
+                Response.error<ResponseBody>(404, "".toResponseBody(null))
+
+            override suspend fun getTmdbAnimeArtwork(malId: Long?, title: String?) =
+                Response.error<ResponseBody>(404, "".toResponseBody(null))
+        }
+
+        val animeRepo = createAnimeRepository(FakeHoshikaApi(), fakeAniScroll)
+        val playbackRepo = PlaybackRepository(
+            aniScrollApi = fakeAniScroll,
+            aniSkipApi = FakeAniSkipApi(),
+            dao = dao,
+            idConverter = animeRepo.idConverter
+        )
+
+        val overgeared = `in`.aniscroll.tv.domain.model.Anime(
+            hoshikaId = 917635L,
+            anilistId = 212888L,
+            malId = 64340L,
+            title = "Tempal: Item no Chikara",
+            englishTitle = "Overgeared",
+            format = "TV",
+            totalEpisodes = 12
+        )
+
+        // 1. Sub then Dub must each call their respective endpoints (never reuse Sub cache for Dub)
+        val subRes = playbackRepo.resolveEpisodeStream(overgeared, episodeNumber = 8, language = "sub")
+        assertTrue(subRes is `in`.aniscroll.tv.data.repository.StreamLoadResult.Success)
+        assertFalse((subRes as `in`.aniscroll.tv.data.repository.StreamLoadResult.Success).fromShortLivedCache)
+
+        val dubRes = playbackRepo.resolveEpisodeStream(overgeared, episodeNumber = 8, language = "dub")
+        assertTrue(dubRes is `in`.aniscroll.tv.data.repository.StreamLoadResult.Success)
+        assertFalse((dubRes as `in`.aniscroll.tv.data.repository.StreamLoadResult.Success).fromShortLivedCache)
+        assertEquals("dub", dubRes.streamData.language)
+
+        assertEquals(
+            listOf(
+                "/api/watch/megaplay/212888/8/sub",
+                "/api/watch/megaplay/212888/8/dub"
+            ),
+            overgearedWatchCalls
+        )
+        assertTrue(playbackRepo.hasFreshCachedStream("TV", 212888L, 8, "sub", hoshikaId = 917635L))
+        assertTrue(playbackRepo.hasFreshCachedStream("TV", 212888L, 8, "dub", hoshikaId = 917635L))
+
+        // 2. Signed URL expiration shorter than 180s TTL must shorten cache expiry
+        val nowMs = 1_700_000_000_000L
+        val shortExpSeconds = (nowMs / 1000L) + 45L // expires in 45s -> effective cache TTL = 45s - 15s = 30s
+        val signedStream = `in`.aniscroll.tv.domain.model.StreamData(
+            anilistId = 212888L,
+            episodeNumber = 8,
+            language = "dub",
+            sources = listOf(
+                `in`.aniscroll.tv.domain.model.StreamQualitySource(
+                    url = "https://cdn.example.com/master.m3u8?expires=$shortExpSeconds",
+                    quality = "Auto"
+                )
+            ),
+            subtitles = emptyList()
+        )
+        val computedExpiry = PlaybackRepository.computeCacheExpiresAtElapsedMs(
+            streamData = signedStream,
+            cachedAtElapsedMs = 10_000L,
+            nowEpochMs = nowMs
+        )
+        assertEquals(40_000L, computedExpiry)
+    }
+
+    @Test
+    fun overgearedEpisode8_dubSubDubRegression_preservesDubAndRebuildsTrackPreferencesAcrossRestart() = runTest {
+        val apiRequests = mutableListOf<String>()
+        val fakeHoshika = FakeHoshikaApi(
+            detailsJson = """
+                {
+                  "shortId": 917635,
+                  "anilistId": 212888,
+                  "malId": 64340,
+                  "titleRomaji": "Tempal: Item no Chikara",
+                  "titleEnglish": "Overgeared",
+                  "format": "TV",
+                  "episodes": 12
+                }
+            """.trimIndent()
+        )
+        val fakeAniScroll = object : AniScrollApi {
+            override suspend fun getWatchStreams(source: String, anilistId: Long, episode: Int, language: String): Response<ResponseBody> {
+                val route = "/api/watch/$source/$anilistId/$episode/$language"
+                apiRequests.add(route)
+                val body = """
+                    {
+                      "anilistId": $anilistId,
+                      "malId": 64340,
+                      "title": "Overgeared",
+                      "episode": $episode,
+                      "type": "$language",
+                      "source": "megaplay",
+                      "server": "MegaPlay Direct",
+                      "embedUrl": "https://megaplay.buzz/",
+                      "m3u8": "https://fetch.nexabloom.top/anime/overgeared/master.m3u8",
+                      "hlsProxyUrl": "https://anivault-scraper-five.vercel.app/api/proxy/hls?url=https%3A%2F%2Ffetch.nexabloom.top%2Fanime%2Fovergeared%2Fmaster.m3u8&ref=https%3A%2F%2Fmegaplay.buzz%2F",
+                      "playbackMode": "hls",
+                      "iframeOnly": false
+                    }
+                """.trimIndent()
+                return Response.success(body.toResponseBody("application/json".toMediaType()))
+            }
+
+            override suspend fun getZokoAnimeStreams(anilistId: Long, episode: Int, language: String) =
+                getWatchStreams("zokoanime", anilistId, episode, language)
+
+            override suspend fun getMegaPlayStreams(anilistId: Long, episode: Int, language: String) =
+                getWatchStreams("megaplay", anilistId, episode, language)
+
+            override suspend fun searchAnimeIds(query: String, limit: Int) =
+                Response.error<ResponseBody>(404, "".toResponseBody(null))
+
+            override suspend fun getAniListIdFromMal(malId: Long) =
+                Response.error<ResponseBody>(404, "".toResponseBody(null))
+
+            override suspend fun getHoshikaProxy(path: String, query: String?, page: Int?, genre: String?, day: String?) =
+                Response.error<ResponseBody>(404, "".toResponseBody(null))
+
+            override suspend fun getTmdbAnimeArtwork(malId: Long?, title: String?) =
+                Response.error<ResponseBody>(404, "".toResponseBody(null))
+        }
+
+        val animeRepo = createAnimeRepository(fakeHoshika, fakeAniScroll)
+        val playbackRepo = PlaybackRepository(
+            aniScrollApi = fakeAniScroll,
+            aniSkipApi = FakeAniSkipApi(),
+            dao = dao,
+            idConverter = animeRepo.idConverter
+        )
+        val prefs = UserPreferencesRepository(context)
+        val exoManager1 = ExoPlayerManager(context)
+        val controller1 = PlaybackController(
+            exoPlayerManager = exoManager1,
+            animeRepository = animeRepo,
+            playbackRepository = playbackRepo,
+            preferencesRepository = prefs
+        )
+
+        try {
+            // Step 1-8: Open Overgeared Episode 8 with Dub selected
+            controller1.startPlaybackSession(hoshikaId = 917635L, episodeNumber = 8, requestedLanguage = "dub")
+            composeTestRule.waitUntil(timeoutMillis = 5000) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                !controller1.uiState.value.isLoading && controller1.uiState.value.anime != null
+            }
+            assertEquals("dub", controller1.uiState.value.audioLanguage)
+            assertEquals(8, controller1.uiState.value.currentEpisodeNumber)
+            assertEquals("/api/watch/megaplay/212888/8/dub", apiRequests.last())
+            assertEquals(
+                listOf("en", "en-us", "en-gb"),
+                exoManager1.peekPlayer()?.trackSelectionParameters?.preferredAudioLanguages
+            )
+
+            // Step 9-10: Switch to Sub -> verify /sub requested and Japanese track preference applied
+            controller1.switchAudioLanguage("sub")
+            composeTestRule.waitUntil(timeoutMillis = 5000) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                controller1.uiState.value.audioLanguage == "sub" &&
+                    exoManager1.peekPlayer()?.trackSelectionParameters?.preferredAudioLanguages == listOf("ja", "ja-jp")
+            }
+            assertEquals("/api/watch/megaplay/212888/8/sub", apiRequests.last())
+
+            // Step 11-12: Switch back to Dub -> verify /dub requested (or Dub cache) and English track preference restored
+            controller1.switchAudioLanguage("dub")
+            composeTestRule.waitUntil(timeoutMillis = 5000) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                controller1.uiState.value.audioLanguage == "dub" &&
+                    exoManager1.peekPlayer()?.trackSelectionParameters?.preferredAudioLanguages == listOf("en", "en-us", "en-gb")
+            }
+
+            controller1.exitAndReleasePlayer()
+        } finally {
+            exoManager1.releasePlayer()
+        }
+
+        // Simulate complete app close and reopen with a fresh PlaybackController & fresh PlaybackRepository
+        val apiRequestsAfterRestart = mutableListOf<String>()
+        val freshAniScroll = object : AniScrollApi by fakeAniScroll {
+            override suspend fun getWatchStreams(source: String, anilistId: Long, episode: Int, language: String): Response<ResponseBody> {
+                apiRequestsAfterRestart.add("/api/watch/$source/$anilistId/$episode/$language")
+                return fakeAniScroll.getWatchStreams(source, anilistId, episode, language)
+            }
+        }
+        val freshAnimeRepo = createAnimeRepository(fakeHoshika, freshAniScroll)
+        val freshPlaybackRepo = PlaybackRepository(
+            aniScrollApi = freshAniScroll,
+            aniSkipApi = FakeAniSkipApi(),
+            dao = dao,
+            idConverter = freshAnimeRepo.idConverter
+        )
+        val exoManager2 = ExoPlayerManager(context)
+        val controller2 = PlaybackController(
+            exoPlayerManager = exoManager2,
+            animeRepository = freshAnimeRepo,
+            playbackRepository = freshPlaybackRepo,
+            preferencesRepository = prefs
+        )
+
+        try {
+            // Reopen Episode 8 with requestedLanguage = null (relies on persisted preference)
+            controller2.startPlaybackSession(hoshikaId = 917635L, episodeNumber = 8, requestedLanguage = null)
+            composeTestRule.waitUntil(timeoutMillis = 5000) {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                !controller2.uiState.value.isLoading && controller2.uiState.value.anime != null
+            }
+            assertEquals("dub", controller2.uiState.value.audioLanguage)
+            assertEquals(listOf("/api/watch/megaplay/212888/8/dub"), apiRequestsAfterRestart)
+            assertEquals(
+                listOf("en", "en-us", "en-gb"),
+                exoManager2.peekPlayer()?.trackSelectionParameters?.preferredAudioLanguages
+            )
+            controller2.exitAndReleasePlayer()
+        } finally {
+            exoManager2.releasePlayer()
+        }
+    }
+
     private fun createAnimeRepository(
         hoshikaApi: HoshikaApi,
         aniScrollApi: AniScrollApi,

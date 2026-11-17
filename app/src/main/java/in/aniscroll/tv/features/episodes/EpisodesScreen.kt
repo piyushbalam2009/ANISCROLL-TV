@@ -230,7 +230,11 @@ fun EpisodesScreen(
                             focusRequester = focusRequester,
                             onClick = {
                                 lastSelectedEpisodeNumber = episode.number
-                                onPlayEpisode(hoshikaId, episode.number, progress?.language)
+                                onPlayEpisode(
+                                    hoshikaId,
+                                    episode.number,
+                                    progress?.takeUnless { it.completed }?.language
+                                )
                             }
                         )
                     }

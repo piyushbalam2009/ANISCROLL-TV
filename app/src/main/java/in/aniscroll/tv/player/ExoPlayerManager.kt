@@ -116,6 +116,8 @@ class ExoPlayerManager(private val context: Context) {
     var preferSoftwareDecoderFallback: Boolean = false
         private set
 
+    val audioTrackManager = AudioTrackManager()
+
     private val lock = Any()
 
     private val analyticsListener = object : AnalyticsListener {
@@ -573,10 +575,12 @@ class ExoPlayerManager(private val context: Context) {
         selectedSourceUrl: String,
         startPositionMs: Long = 0L,
         playWhenReady: Boolean = true,
-        playbackSpeed: Float = 1.0f
+        playbackSpeed: Float = 1.0f,
+        preferredAudioType: String = streamData.language
     ) {
         val player = getOrCreatePlayer()
         lastVideoCodecError = null
+        audioTrackManager.resetSessionDiagnostics()
 
         val okHttpFactory = OkHttpDataSource.Factory(NetworkModule.streamingOkHttpClient)
             .setUserAgent(streamData.headers["User-Agent"] ?: DEFAULT_USER_AGENT)
@@ -617,14 +621,23 @@ class ExoPlayerManager(private val context: Context) {
                 .createMediaSource(mediaItem)
         }
 
-        // Ensure video track is explicitly enabled before preparing the new media source
+        val effectiveAudioType = AudioTrackManager.normalizeAudioType(preferredAudioType)
+            ?: AudioTrackManager.normalizeAudioType(streamData.language)
+            ?: AudioTrackManager.AUDIO_SUB
+
+        // Clear incompatible previous overrides (video/audio TrackGroups from prior MediaSources)
+        // and configure preferred audio languages BEFORE preparing the new MediaSource
         player.trackSelectionParameters = player.trackSelectionParameters
             .buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false)
+            .clearOverridesOfType(C.TRACK_TYPE_VIDEO)
             .build()
+        audioTrackManager.configureAudioTrackParameters(player, effectiveAudioType)
 
         StreamingDiagnostics.logEvent(
-            "load_stream is_hls=$isHls start_pos_ms=$startPositionMs subs=${subtitleConfigs.size} sw_fallback=$preferSoftwareDecoderFallback"
+            "load_stream anilist_id=${streamData.anilistId} ep=${streamData.episodeNumber} " +
+                "audio_type=$effectiveAudioType is_hls=$isHls start_pos_ms=$startPositionMs " +
+                "subs=${subtitleConfigs.size} sw_fallback=$preferSoftwareDecoderFallback"
         )
 
         player.setMediaSource(mediaSource, startPositionMs.coerceAtLeast(0L))

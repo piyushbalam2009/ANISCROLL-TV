@@ -232,6 +232,13 @@ class PlaybackController(
                         maxHardwareHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
                     )
                 }
+
+                // Verify discovered HLS audio renditions and enforce English (dub) / Japanese (sub) when available
+                exoPlayerManager.audioTrackManager.inspectAndEnsureAudioSelection(
+                    player = player,
+                    tracks = tracks,
+                    desiredAudioType = _uiState.value.audioLanguage
+                )
             }
 
             val stream = currentStreamData ?: return
@@ -287,7 +294,8 @@ class PlaybackController(
                         selectedSourceUrl = fallbackSource.url,
                         startPositionMs = currentPos,
                         playWhenReady = !isAppInBackground,
-                        playbackSpeed = _uiState.value.playbackSpeed
+                        playbackSpeed = _uiState.value.playbackSpeed,
+                        preferredAudioType = _uiState.value.audioLanguage
                     )
                     return
                 }
@@ -432,6 +440,7 @@ class PlaybackController(
         // Immediately clear previous episode skip intervals so stale buttons never appear during loading
         aniSkipManager.resetForEpisode(episodeNumber.coerceAtLeast(1))
         exoPlayerManager.resetDecoderFallbackForNewSession()
+        exoPlayerManager.audioTrackManager.resetSessionDiagnostics()
 
         val currentTier = networkMonitor?.refreshState() ?: NetworkTier.STANDARD
         activeMetrics = StreamingDiagnostics.startSession(
@@ -448,7 +457,9 @@ class PlaybackController(
             val prefs = preferencesRepository.settingsFlow.first()
             if (!isSessionActive || generation != sessionGeneration) return@launch
 
-            val language = (requestedLanguage ?: prefs.preferredAudioLanguage).lowercase()
+            val language = AudioTrackManager.normalizeAudioType(requestedLanguage)
+                ?: AudioTrackManager.normalizeAudioType(prefs.preferredAudioLanguage)
+                ?: AudioTrackManager.AUDIO_SUB
             val requestedEp = episodeNumber.coerceAtLeast(1)
 
             // Fast-path: if we are switching episodes for the already-loaded anime, reuse metadata & episodes in 0ms
@@ -651,7 +662,8 @@ class PlaybackController(
                     selectedSourceUrl = chosenSource.url,
                     startPositionMs = startPos,
                     playWhenReady = shouldAutoPlay,
-                    playbackSpeed = speed
+                    playbackSpeed = speed,
+                    preferredAudioType = language
                 )
 
                 val player = exoPlayerManager.peekPlayer()
@@ -704,11 +716,17 @@ class PlaybackController(
         if (!isSessionActive) return
         val current = _uiState.value
         val anime = current.anime ?: return
-        val normalized = newLanguage.lowercase()
+        val normalized = AudioTrackManager.normalizeAudioType(newLanguage) ?: return
         if (normalized == current.audioLanguage && current.errorMessage == null) return
 
-        val savedPosition = exoPlayerManager.peekPlayer()?.currentPosition?.coerceAtLeast(0L) ?: 0L
+        val savedPosition = exoPlayerManager.peekPlayer()?.currentPosition?.coerceAtLeast(0L)
+            ?: _progressState.value.currentPositionMs.coerceAtLeast(0L)
         val generation = sessionGeneration
+
+        StreamingDiagnostics.logEvent(
+            "audio_language_switch_requested hoshika_id=${anime.hoshikaId} ep=${current.currentEpisodeNumber} " +
+                "from=${current.audioLanguage} to=$normalized pos_ms=$savedPosition"
+        )
 
         audioSwitchJob?.cancel()
         audioSwitchJob = viewModelScope.launch {
@@ -734,24 +752,65 @@ class PlaybackController(
                 is StreamLoadResult.Success -> {
                     val newStream = result.streamData
                     currentStreamData = newStream
+                    streamRetryCount = 0
+                    hasRefreshedStreamOnError = false
                     aniSkipManager.setIntervals(result.skipIntervals)
-                    val chosenSource = newStream.sources.first()
+
+                    val preferredQuality = current.selectedQualityLabel
+                    val chosenSource = newStream.sources.find {
+                        it.quality.equals(preferredQuality, ignoreCase = true)
+                    } ?: newStream.sources.first()
                     currentSelectedSourceUrl = chosenSource.url
+
+                    val qualities = qualityManager.extractAvailableQualities(
+                        sources = newStream.sources,
+                        tracks = null,
+                        maxSupportedHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
+                    )
+
                     _uiState.update {
                         it.copy(
                             isBuffering = false,
+                            errorMessage = null,
                             audioLanguage = normalized,
+                            availableQualities = qualities,
+                            selectedQualityLabel = chosenSource.quality,
                             availableSubtitles = newStream.subtitles,
                             transientToastMessage = "Audio: ${normalized.uppercase()}"
                         )
                     }
+
                     exoPlayerManager.loadStream(
                         streamData = newStream,
                         selectedSourceUrl = chosenSource.url,
                         startPositionMs = savedPosition,
                         playWhenReady = !isAppInBackground,
-                        playbackSpeed = _uiState.value.playbackSpeed
+                        playbackSpeed = _uiState.value.playbackSpeed,
+                        preferredAudioType = normalized
                     )
+
+                    val player = exoPlayerManager.peekPlayer()
+                    if (player != null) {
+                        val currentTier = networkMonitor?.currentTier() ?: NetworkTier.STANDARD
+                        val initialOption = qualities.find {
+                            it.label.equals(chosenSource.quality, ignoreCase = true)
+                        } ?: AvailableQualityOption("Auto", null)
+                        qualityManager.applyQualitySelection(
+                            player = player,
+                            option = initialOption,
+                            networkTier = currentTier,
+                            maxHardwareHeight = exoPlayerManager.deviceProfile.effectiveMaxPlaybackHeight
+                        )
+                        subtitleManager.applyTrackSelection(
+                            player = player,
+                            enabled = _uiState.value.subtitlesEnabled,
+                            preferredLanguage = _uiState.value.selectedSubtitleLanguage,
+                            availableSubtitles = newStream.subtitles
+                        )
+                    }
+
+                    persistCurrentProgress(languageOverride = normalized)
+
                     aniSkipJob?.cancel()
                     aniSkipJob = viewModelScope.launch {
                         val enriched = playbackRepository.fetchAniSkipIntervals(
@@ -785,7 +844,8 @@ class PlaybackController(
                 selectedSourceUrl = option.sourceUrl,
                 startPositionMs = currentPos,
                 playWhenReady = player.playWhenReady && !isAppInBackground,
-                playbackSpeed = _uiState.value.playbackSpeed
+                playbackSpeed = _uiState.value.playbackSpeed,
+                preferredAudioType = _uiState.value.audioLanguage
             )
         } else {
             val currentTier = networkMonitor?.currentTier() ?: NetworkTier.STANDARD
@@ -1084,7 +1144,8 @@ class PlaybackController(
                 selectedSourceUrl = alternateSource.url,
                 startPositionMs = resumePos,
                 playWhenReady = !isAppInBackground,
-                playbackSpeed = _uiState.value.playbackSpeed
+                playbackSpeed = _uiState.value.playbackSpeed,
+                preferredAudioType = _uiState.value.audioLanguage
             )
             qualityManager.ensureVideoTrackEnabled(
                 player = recreatedPlayer,
@@ -1208,7 +1269,7 @@ class PlaybackController(
         }
     }
 
-    fun persistCurrentProgress() {
+    fun persistCurrentProgress(languageOverride: String? = null) {
         val state = _uiState.value
         val anime = state.anime ?: return
         val stream = currentStreamData ?: return
@@ -1217,13 +1278,17 @@ class PlaybackController(
         val dur = player.duration.coerceAtLeast(0L)
         if (dur <= 0L) return
 
+        val effectiveLanguage = AudioTrackManager.normalizeAudioType(languageOverride)
+            ?: AudioTrackManager.normalizeAudioType(state.audioLanguage)
+            ?: AudioTrackManager.AUDIO_SUB
+
         viewModelScope.launch {
             withContext(NonCancellable) {
                 playbackRepository.savePlaybackProgress(
                     anime = anime,
                     anilistId = stream.anilistId,
                     episodeNumber = state.currentEpisodeNumber,
-                    language = state.audioLanguage,
+                    language = effectiveLanguage,
                     positionMs = pos,
                     durationMs = dur
                 )

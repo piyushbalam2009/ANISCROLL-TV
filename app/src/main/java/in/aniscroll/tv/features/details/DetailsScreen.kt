@@ -921,7 +921,11 @@ fun DetailsScreen(
                                                 index = listState.firstVisibleItemIndex,
                                                 offset = listState.firstVisibleItemScrollOffset
                                             )
-                                            onPlayEpisode(anime.hoshikaId, episode.number, epProgress?.language)
+                                            onPlayEpisode(
+                                                anime.hoshikaId,
+                                                episode.number,
+                                                epProgress?.takeUnless { it.completed }?.language
+                                            )
                                         }
                                     )
                                 }

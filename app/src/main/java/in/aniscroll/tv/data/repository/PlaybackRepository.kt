@@ -38,7 +38,8 @@ sealed class StreamLoadResult {
 private data class CachedStreamEntry(
     val streamData: StreamData,
     val provider: StreamingProvider,
-    val cachedAtElapsedMs: Long
+    val cachedAtElapsedMs: Long,
+    val expiresAtElapsedMs: Long
 )
 
 class PlaybackRepository(
@@ -52,6 +53,8 @@ class PlaybackRepository(
         private const val COMPLETION_THRESHOLD = 0.90f
         // Short-lived cache (180s) keeps prewarmed detail-page and next-episode streams warm without keeping expiring CDN tokens stale
         private const val STREAM_CACHE_TTL_MS = 180_000L
+        private const val SIGNED_URL_EXPIRY_SAFETY_BUFFER_MS = 15_000L
+        private val SIGNED_EXPIRY_PARAM_REGEX = Regex("""(?:[?&])(exp|expires|expire)=(\d{10,13})""", RegexOption.IGNORE_CASE)
 
         /**
          * Delegates to [StreamingSourceResolver.resolveSource] to select the mandatory provider:
@@ -60,6 +63,33 @@ class PlaybackRepository(
          */
         fun selectProviderForFormat(format: String?): StreamingProvider {
             return StreamingSourceResolver.resolveSource(format)
+        }
+
+        internal fun computeCacheExpiresAtElapsedMs(
+            streamData: StreamData,
+            cachedAtElapsedMs: Long,
+            nowEpochMs: Long = System.currentTimeMillis()
+        ): Long {
+            val defaultExpiry = cachedAtElapsedMs + STREAM_CACHE_TTL_MS
+            var earliestSignedRemainingMs: Long? = null
+
+            for (source in streamData.sources) {
+                val match = SIGNED_EXPIRY_PARAM_REGEX.find(source.url) ?: continue
+                val rawTimestamp = match.groupValues.getOrNull(2)?.toLongOrNull() ?: continue
+                val expiryEpochMs = if (rawTimestamp < 10_000_000_000L) rawTimestamp * 1000L else rawTimestamp
+                val remainingMs = (expiryEpochMs - nowEpochMs - SIGNED_URL_EXPIRY_SAFETY_BUFFER_MS).coerceAtLeast(0L)
+                earliestSignedRemainingMs = if (earliestSignedRemainingMs == null) {
+                    remainingMs
+                } else {
+                    minOf(earliestSignedRemainingMs, remainingMs)
+                }
+            }
+
+            return if (earliestSignedRemainingMs != null) {
+                minOf(defaultExpiry, cachedAtElapsedMs + earliestSignedRemainingMs)
+            } else {
+                defaultExpiry
+            }
         }
     }
 
@@ -77,15 +107,26 @@ class PlaybackRepository(
         format: String?,
         anilistId: Long,
         episodeNumber: Int,
-        language: String
+        language: String,
+        hoshikaId: Long? = null
     ): Boolean {
         if (anilistId <= 0L) return false
         val normalizedLang = if (language.equals("dub", ignoreCase = true)) "dub" else "sub"
         val provider = StreamingSourceResolver.resolveSource(format)
         val targetEpisode = StreamingSourceResolver.resolveEpisodeNumber(format, episodeNumber)
-        val cacheKey = "${provider.sourceId}:$anilistId:$targetEpisode:$normalizedLang"
-        val cached = shortLivedStreamCache[cacheKey] ?: return false
-        return (SystemClock.elapsedRealtime() - cached.cachedAtElapsedMs) < STREAM_CACHE_TTL_MS
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val exactKey = hoshikaId?.takeIf { it > 0L }?.let {
+            "${provider.sourceId}:$it:$anilistId:$targetEpisode:$normalizedLang"
+        }
+        if (exactKey != null) {
+            val cached = shortLivedStreamCache[exactKey] ?: return false
+            return nowElapsed < cached.expiresAtElapsedMs
+        }
+        return shortLivedStreamCache.entries.any { (key, entry) ->
+            key.startsWith("${provider.sourceId}:") &&
+                key.endsWith(":$anilistId:$targetEpisode:$normalizedLang") &&
+                nowElapsed < entry.expiresAtElapsedMs
+        }
     }
 
     /**
@@ -146,7 +187,7 @@ class PlaybackRepository(
         val effectiveFormat = resolvedTarget.format ?: anime.format
         val provider = StreamingSourceResolver.resolveSource(effectiveFormat)
         val targetEpisode = StreamingSourceResolver.resolveEpisodeNumber(effectiveFormat, episodeNumber)
-        val cacheKey = "${provider.sourceId}:$anilistId:$targetEpisode:$normalizedLang"
+        val cacheKey = "${provider.sourceId}:${anime.hoshikaId}:$anilistId:$targetEpisode:$normalizedLang"
 
         suspend fun awaitResumePositionMs(): Long {
             val savedHistory = if (targetEpisode == preliminaryEpisode) {
@@ -167,7 +208,11 @@ class PlaybackRepository(
         } else {
             val nowElapsed = SystemClock.elapsedRealtime()
             val cached = shortLivedStreamCache[cacheKey]
-            if (cached != null && (nowElapsed - cached.cachedAtElapsedMs) < STREAM_CACHE_TTL_MS) {
+            if (cached != null && nowElapsed < cached.expiresAtElapsedMs) {
+                `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                    "stream_cache_hit key=$cacheKey audio=${cached.streamData.language} " +
+                        "primary_url=${cached.streamData.sources.firstOrNull()?.url?.substringBefore("&ref=") ?: "none"}"
+                )
                 val resumePositionMs = awaitResumePositionMs()
                 return@withContext StreamLoadResult.Success(
                     streamData = cached.streamData,
@@ -178,6 +223,8 @@ class PlaybackRepository(
                     apiRequestDurationMs = 0L,
                     fromShortLivedCache = true
                 )
+            } else if (cached != null) {
+                shortLivedStreamCache.remove(cacheKey, cached)
             }
         }
 
@@ -205,6 +252,11 @@ class PlaybackRepository(
         inFlightRequests[cacheKey] = deferred
 
         try {
+            `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                "stream_resolve_request hoshika_id=${anime.hoshikaId} anilist_id=$anilistId " +
+                    "ep=$targetEpisode source=${provider.sourceId} requested_audio=$normalizedLang " +
+                    "endpoint=api/watch/${provider.sourceId}/$anilistId/$targetEpisode/$normalizedLang"
+            )
             val apiStartMs = SystemClock.elapsedRealtime()
             val response = runCatching {
                 aniScrollApi.getWatchStreams(
@@ -286,10 +338,19 @@ class PlaybackRepository(
                 rawStreamData
             }
 
+            val cachedAtMs = SystemClock.elapsedRealtime()
+            val expiresAtMs = computeCacheExpiresAtElapsedMs(streamData, cachedAtMs)
             shortLivedStreamCache[cacheKey] = CachedStreamEntry(
                 streamData = streamData,
                 provider = provider,
-                cachedAtElapsedMs = SystemClock.elapsedRealtime()
+                cachedAtElapsedMs = cachedAtMs,
+                expiresAtElapsedMs = expiresAtMs
+            )
+            `in`.aniscroll.tv.player.StreamingDiagnostics.logEvent(
+                "stream_resolve_response source=${provider.sourceId} anilist_id=$anilistId ep=$targetEpisode " +
+                    "requested_audio=$normalizedLang returned_audio=${streamData.language} " +
+                    "sources=${streamData.sources.size} subs=${streamData.subtitles.size} " +
+                    "primary_url=${streamData.sources.firstOrNull()?.url?.substringBefore("&ref=") ?: "none"}"
             )
             deferred.complete(streamData)
 
