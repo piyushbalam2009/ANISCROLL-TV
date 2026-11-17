@@ -45,12 +45,13 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
+import `in`.aniscroll.tv.artwork.ArtworkType
+import `in`.aniscroll.tv.core.designsystem.TvArtworkImage
 import `in`.aniscroll.tv.core.designsystem.TvColors
 import `in`.aniscroll.tv.core.designsystem.TvErrorBanner
 import `in`.aniscroll.tv.core.designsystem.TvLoadingIndicator
 import `in`.aniscroll.tv.core.designsystem.TvSelectableChip
+import `in`.aniscroll.tv.core.device.TvDeviceCapabilities
 import `in`.aniscroll.tv.data.repository.AnimeRepository
 import `in`.aniscroll.tv.data.repository.ResourceResult
 import `in`.aniscroll.tv.domain.model.ScheduleItem
@@ -284,24 +285,36 @@ private fun ScheduleEntryRow(
         }
 
         // Poster
+        val context = LocalContext.current
+        val deviceProfile = remember(context) { TvDeviceCapabilities.getDeviceProfile(context) }
+
         Box(
             modifier = Modifier
                 .width(64.dp)
                 .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(4.dp))
-                .background(TvColors.SecondaryBackground)
+                .background(TvColors.SecondaryBackground),
+            contentAlignment = Alignment.Center
         ) {
-            if (!item.anime.posterUrl.isNullOrBlank()) {
-                AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current)
-                        .data(item.anime.posterUrl)
-                        .crossfade(true)
-                        .size(160, 240)
-                        .build(),
-                    contentDescription = item.anime.preferredTitle,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
+            TvArtworkImage(
+                primaryUrl = item.anime.posterUrl,
+                fallbackUrl = item.anime.bannerUrl,
+                artworkType = ArtworkType.POSTER,
+                screenName = "ScheduleScreen",
+                hoshikaId = item.anime.hoshikaId,
+                contentDescription = item.anime.preferredTitle,
+                targetWidthPx = deviceProfile.recommendedPosterWidthPx,
+                targetHeightPx = deviceProfile.recommendedPosterHeightPx,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Box(modifier = Modifier.fillMaxSize().padding(4.dp), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = item.anime.preferredTitle.take(2).uppercase(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TvColors.MutedText
+                    )
+                }
             }
         }
 

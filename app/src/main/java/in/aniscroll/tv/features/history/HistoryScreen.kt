@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,10 +38,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
+import `in`.aniscroll.tv.artwork.ArtworkType
+import `in`.aniscroll.tv.core.designsystem.TvArtworkImage
 import `in`.aniscroll.tv.core.designsystem.TvColors
 import `in`.aniscroll.tv.core.designsystem.TvFocusableButton
+import `in`.aniscroll.tv.core.device.TvDeviceCapabilities
 import `in`.aniscroll.tv.data.repository.AnimeRepository
 import `in`.aniscroll.tv.domain.model.WatchProgressItem
 import kotlinx.coroutines.flow.SharingStarted
@@ -141,24 +143,38 @@ private fun ContinueWatchingRowCard(
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        val context = LocalContext.current
+        val deviceProfile = remember(context) { TvDeviceCapabilities.getDeviceProfile(context) }
+
         Box(
             modifier = Modifier
                 .width(92.dp)
                 .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(6.dp))
-                .background(TvColors.SecondaryBackground)
+                .background(TvColors.SecondaryBackground),
+            contentAlignment = Alignment.Center
         ) {
-            if (!item.posterUrl.isNullOrBlank()) {
-                AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current)
-                        .data(item.posterUrl)
-                        .crossfade(true)
-                        .size(200, 300)
-                        .build(),
-                    contentDescription = item.animeTitle,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
+            TvArtworkImage(
+                primaryUrl = item.posterUrl,
+                fallbackUrl = item.bannerUrl,
+                artworkType = ArtworkType.POSTER,
+                screenName = "HistoryScreen",
+                hoshikaId = item.hoshikaId,
+                contentDescription = item.animeTitle,
+                targetWidthPx = deviceProfile.recommendedPosterWidthPx,
+                targetHeightPx = deviceProfile.recommendedPosterHeightPx,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Box(modifier = Modifier.fillMaxSize().padding(6.dp), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "EP ${item.episodeNumber}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TvColors.SecondaryText,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
 

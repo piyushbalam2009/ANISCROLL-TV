@@ -64,8 +64,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
+import `in`.aniscroll.tv.artwork.ArtworkType
+import `in`.aniscroll.tv.core.designsystem.TvArtworkImage
 import `in`.aniscroll.tv.core.designsystem.TvColors
 import `in`.aniscroll.tv.core.designsystem.TvContentLoadingCopy
 import `in`.aniscroll.tv.core.designsystem.TvContentLoadingScreen
@@ -73,6 +73,7 @@ import `in`.aniscroll.tv.core.designsystem.TvEpisodeListSkeleton
 import `in`.aniscroll.tv.core.designsystem.TvErrorBanner
 import `in`.aniscroll.tv.core.designsystem.TvFocusableButton
 import `in`.aniscroll.tv.core.designsystem.TvSectionLoadingHeader
+import `in`.aniscroll.tv.core.device.TvDeviceCapabilities
 import `in`.aniscroll.tv.data.local.UiPreviewFixtures
 import `in`.aniscroll.tv.data.repository.AnimeRepository
 import `in`.aniscroll.tv.data.repository.ResourceResult
@@ -487,7 +488,8 @@ fun DetailsScreen(
             }
             else -> {
                 val anime = state.anime!!
-                val bannerUrl = anime.bannerUrl ?: anime.posterUrl
+                val context = LocalContext.current
+                val deviceProfile = remember(context) { TvDeviceCapabilities.getDeviceProfile(context) }
 
                 CompositionLocalProvider(LocalBringIntoViewSpec provides detailsBringIntoViewSpec) {
                     LazyColumn(
@@ -507,24 +509,24 @@ fun DetailsScreen(
                                         .fillMaxWidth()
                                         .testTag("details_hero_section")
                                 ) {
-                                    // Backdrop Banner visible at the top of the detail page
+                                    // Backdrop Banner visible at the top of the detail page (falls back cleanly to poster)
                                     Box(
                                         modifier = Modifier
                                             .matchParentSize()
                                             .testTag("details_backdrop_banner")
                                     ) {
-                                        if (!bannerUrl.isNullOrBlank()) {
-                                            AsyncImage(
-                                                model = ImageRequest.Builder(LocalContext.current)
-                                                    .data(bannerUrl)
-                                                    .crossfade(true)
-                                                    .size(1280, 720)
-                                                    .build(),
-                                                contentDescription = "${anime.preferredTitle} banner",
-                                                contentScale = ContentScale.Crop,
-                                                modifier = Modifier.fillMaxSize()
-                                            )
-                                        }
+                                        TvArtworkImage(
+                                            primaryUrl = anime.bannerUrl,
+                                            fallbackUrl = anime.posterUrl,
+                                            artworkType = ArtworkType.BANNER,
+                                            screenName = "DetailsBanner",
+                                            hoshikaId = anime.hoshikaId,
+                                            contentDescription = "${anime.preferredTitle} banner",
+                                            targetWidthPx = deviceProfile.recommendedBannerWidthPx,
+                                            targetHeightPx = deviceProfile.recommendedBannerHeightPx,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
 
                                         // Horizontal vignette for left-side text contrast while keeping right-side banner clear
                                         Box(
@@ -598,17 +600,17 @@ fun DetailsScreen(
                                                     .border(1.dp, TvColors.Divider, RoundedCornerShape(8.dp))
                                                     .testTag("details_poster_image")
                                             ) {
-                                                if (!anime.posterUrl.isNullOrBlank()) {
-                                                    AsyncImage(
-                                                        model = ImageRequest.Builder(LocalContext.current)
-                                                            .data(anime.posterUrl)
-                                                            .crossfade(true)
-                                                            .build(),
-                                                        contentDescription = anime.preferredTitle,
-                                                        contentScale = ContentScale.Crop,
-                                                        modifier = Modifier.fillMaxSize()
-                                                    )
-                                                } else {
+                                                TvArtworkImage(
+                                                    primaryUrl = anime.posterUrl,
+                                                    artworkType = ArtworkType.POSTER,
+                                                    screenName = "DetailsPoster",
+                                                    hoshikaId = anime.hoshikaId,
+                                                    contentDescription = anime.preferredTitle,
+                                                    targetWidthPx = deviceProfile.recommendedPosterWidthPx,
+                                                    targetHeightPx = deviceProfile.recommendedPosterHeightPx,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.fillMaxSize()
+                                                ) {
                                                     Box(
                                                         modifier = Modifier
                                                             .fillMaxSize()
@@ -915,6 +917,7 @@ fun DetailsScreen(
                                         progressItem = epProgress,
                                         isCurrentlyPlaying = state.lastWatchedEpisode?.episodeNumber == episode.number &&
                                             state.lastWatchedEpisode?.completed == false,
+                                        animePosterUrl = anime.posterUrl,
                                         onClick = {
                                             viewModel.saveScrollPositionForReturn(
                                                 hoshikaId = anime.hoshikaId,

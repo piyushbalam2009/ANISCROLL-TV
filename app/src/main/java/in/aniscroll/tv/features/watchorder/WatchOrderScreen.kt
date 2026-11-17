@@ -64,13 +64,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
+import `in`.aniscroll.tv.artwork.ArtworkType
+import `in`.aniscroll.tv.core.designsystem.TvArtworkImage
 import `in`.aniscroll.tv.core.designsystem.TvColors
 import `in`.aniscroll.tv.core.designsystem.TvErrorBanner
 import `in`.aniscroll.tv.core.designsystem.TvFocusableButton
 import `in`.aniscroll.tv.core.designsystem.TvLoadingIndicator
 import `in`.aniscroll.tv.core.designsystem.TvSelectableChip
+import `in`.aniscroll.tv.core.device.TvDeviceCapabilities
 import `in`.aniscroll.tv.data.repository.AnimeRepository
 import `in`.aniscroll.tv.data.repository.ResourceResult
 import `in`.aniscroll.tv.domain.model.FranchiseWatchOrder
@@ -252,22 +253,24 @@ fun WatchOrderScreen(
                 val watchOrder = state.watchOrder!!
                 val entries = watchOrder.entriesForMode(state.selectedMode)
                 val firstEntryFocusRequester = remember { FocusRequester() }
+                val context = LocalContext.current
+                val deviceProfile = remember(context) { TvDeviceCapabilities.getDeviceProfile(context) }
 
                 // Backdrop Banner + Dark Cinematic Gradient
-                if (!watchOrder.franchiseBannerUrl.isNullOrBlank()) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current)
-                            .data(watchOrder.franchiseBannerUrl)
-                            .crossfade(true)
-                            .size(1280, 720)
-                            .build(),
-                        contentDescription = watchOrder.franchiseTitle,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(320.dp)
-                    )
-                }
+                TvArtworkImage(
+                    primaryUrl = watchOrder.franchiseBannerUrl,
+                    fallbackUrl = watchOrder.franchiseCoverUrl,
+                    artworkType = ArtworkType.BANNER,
+                    screenName = "WatchOrderBanner",
+                    hoshikaId = hoshikaId,
+                    contentDescription = watchOrder.franchiseTitle,
+                    targetWidthPx = deviceProfile.recommendedBannerWidthPx,
+                    targetHeightPx = deviceProfile.recommendedBannerHeightPx,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(320.dp)
+                )
 
                 Box(
                     modifier = Modifier
@@ -321,17 +324,18 @@ fun WatchOrderScreen(
                                         .background(TvColors.CardBackground)
                                         .border(1.dp, TvColors.Divider, RoundedCornerShape(8.dp))
                                 ) {
-                                    if (!watchOrder.franchiseCoverUrl.isNullOrBlank()) {
-                                        AsyncImage(
-                                            model = ImageRequest.Builder(LocalContext.current)
-                                                .data(watchOrder.franchiseCoverUrl)
-                                                .crossfade(true)
-                                                .build(),
-                                            contentDescription = watchOrder.franchiseTitle,
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier.fillMaxSize()
-                                        )
-                                    }
+                                    TvArtworkImage(
+                                        primaryUrl = watchOrder.franchiseCoverUrl,
+                                        fallbackUrl = watchOrder.franchiseBannerUrl,
+                                        artworkType = ArtworkType.POSTER,
+                                        screenName = "WatchOrderHeaderPoster",
+                                        hoshikaId = hoshikaId,
+                                        contentDescription = watchOrder.franchiseTitle,
+                                        targetWidthPx = deviceProfile.recommendedPosterWidthPx,
+                                        targetHeightPx = deviceProfile.recommendedPosterHeightPx,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
                                 }
 
                                 Column(
@@ -592,6 +596,9 @@ private fun WatchOrderTimelineRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             // Individual Anime Poster
+            val context = LocalContext.current
+            val deviceProfile = remember(context) { TvDeviceCapabilities.getDeviceProfile(context) }
+
             Box(
                 modifier = Modifier
                     .width(76.dp)
@@ -600,17 +607,18 @@ private fun WatchOrderTimelineRow(
                     .background(TvColors.SecondaryBackground)
                     .border(1.dp, TvColors.Divider, RoundedCornerShape(6.dp))
             ) {
-                if (!entry.posterUrl.isNullOrBlank()) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current)
-                            .data(entry.posterUrl)
-                            .crossfade(true)
-                            .build(),
-                        contentDescription = entry.preferredTitle,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
+                TvArtworkImage(
+                    primaryUrl = entry.posterUrl,
+                    fallbackUrl = entry.bannerUrl,
+                    artworkType = ArtworkType.POSTER,
+                    screenName = "WatchOrderEntry",
+                    hoshikaId = entry.hoshikaId ?: entry.anilistId ?: entry.position.toLong(),
+                    contentDescription = entry.preferredTitle,
+                    targetWidthPx = deviceProfile.recommendedPosterWidthPx,
+                    targetHeightPx = deviceProfile.recommendedPosterHeightPx,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                ) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()

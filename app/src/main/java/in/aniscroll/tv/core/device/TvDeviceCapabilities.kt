@@ -89,6 +89,24 @@ data class TvDeviceProfile(
             if (supports4kDisplay) 2160 else 1080,
             maxHardwareVideoHeight.coerceAtLeast(720)
         )
+
+    val recommendedPosterWidthPx: Int
+        get() = if (isLowRamDevice || performanceTier == TvPerformanceTier.COMPACT_HD) 280 else 440
+
+    val recommendedPosterHeightPx: Int
+        get() = if (isLowRamDevice || performanceTier == TvPerformanceTier.COMPACT_HD) 420 else 660
+
+    val recommendedBannerWidthPx: Int
+        get() = if (isLowRamDevice || performanceTier == TvPerformanceTier.COMPACT_HD) 1280 else 1920
+
+    val recommendedBannerHeightPx: Int
+        get() = if (isLowRamDevice || performanceTier == TvPerformanceTier.COMPACT_HD) 720 else 1080
+
+    val recommendedThumbnailWidthPx: Int
+        get() = if (isLowRamDevice || performanceTier == TvPerformanceTier.COMPACT_HD) 320 else 480
+
+    val recommendedThumbnailHeightPx: Int
+        get() = if (isLowRamDevice || performanceTier == TvPerformanceTier.COMPACT_HD) 180 else 270
 }
 
 object TvDeviceCapabilities {
@@ -416,7 +434,7 @@ object TvDeviceCapabilities {
             .bitmapConfig(Bitmap.Config.ARGB_8888)
             .allowRgb565(profile.isLowRamDevice)
             .crossfade(true)
-            .respectCacheHeaders(false)
+            .respectCacheHeaders(true)
             .memoryCache {
                 MemoryCache.Builder(appCtx)
                     .maxSizePercent(memPercent)
@@ -430,9 +448,11 @@ object TvDeviceCapabilities {
             }
             .eventListener(object : EventListener {
                 override fun onError(request: ImageRequest, result: ErrorResult) {
-                    val host = LogoLogger.extractHost(request.data?.toString())
+                    val (host, sanitizedPath) = LogoLogger.sanitizeUrlForDiagnostics(request.data?.toString())
+                    val (category, httpStatus) = LogoLogger.classifyThrowable(result.throwable)
                     LogoLogger.w(
-                        "Coil global artwork error host=$host category=${LogoFailureCategory.IMAGE_RENDER_FAILURE.name}: ${result.throwable.message}",
+                        "Coil global artwork error host=$host path=$sanitizedPath http=${httpStatus ?: "-"} " +
+                            "category=${category.name}: ${result.throwable.message}",
                         result.throwable
                     )
                 }

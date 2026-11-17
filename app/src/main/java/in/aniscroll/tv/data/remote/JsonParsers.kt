@@ -230,44 +230,63 @@ object JsonParsers {
             return null
         }
 
-        val artworkObj = primaryJson.optJSONObject("artwork")
-            ?: primaryJson.optJSONObject("images")
-        val coverObj = primaryJson.optJSONObject("coverImage")
-            ?: primaryJson.optJSONObject("poster")
-            ?: primaryJson.optJSONObject("image")
-        val bannerObj = primaryJson.optJSONObject("bannerImage")
-            ?: primaryJson.optJSONObject("banner")
+        val artworkContainer = primaryJson.opt("artwork") ?: primaryJson.opt("images")
+        val secondaryArtworkContainer = nestedAnime?.takeIf { it !== primaryJson }?.let {
+            it.opt("artwork") ?: it.opt("images")
+        }
 
-        val rawPosterUrl = primaryJson.optCleanString("coverImage")
-            ?: primaryJson.optCleanString("poster")
-            ?: primaryJson.optCleanString("poster_url")
-            ?: primaryJson.optCleanString("posterUrl")
-            ?: primaryJson.optCleanString("cover")
-            ?: primaryJson.optCleanString("image")
-            ?: coverObj?.optCleanString("extraLarge")
-            ?: coverObj?.optCleanString("large")
-            ?: coverObj?.optCleanString("medium")
-            ?: coverObj?.optCleanString("url")
-            ?: artworkObj?.optCleanString("poster")
-            ?: artworkObj?.optCleanString("large")
-        val posterUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(rawPosterUrl) ?: rawPosterUrl
+        val posterUrl = listOf(
+            primaryJson.opt("coverImage"),
+            primaryJson.opt("cover_image"),
+            primaryJson.opt("poster"),
+            primaryJson.opt("posterUrl"),
+            primaryJson.opt("poster_url"),
+            primaryJson.opt("cover"),
+            primaryJson.opt("image"),
+            artworkContainer?.let { extractRoleFromArtworkContainer(it, POSTER_CONTAINER_KEYS, POSTER_ARRAY_ROLES) },
+            nestedAnime?.takeIf { it !== primaryJson }?.let { sec ->
+                sec.opt("coverImage")
+                    ?: sec.opt("cover_image")
+                    ?: sec.opt("poster")
+                    ?: sec.opt("posterUrl")
+                    ?: sec.opt("poster_url")
+                    ?: sec.opt("cover")
+                    ?: sec.opt("image")
+            },
+            secondaryArtworkContainer?.let { extractRoleFromArtworkContainer(it, POSTER_CONTAINER_KEYS, POSTER_ARRAY_ROLES) }
+        ).firstNotNullOfOrNull { extractArtworkUrl(it) }
 
-        val rawBannerUrl = primaryJson.optCleanString("bannerImage")
-            ?: primaryJson.optCleanString("banner")
-            ?: primaryJson.optCleanString("banner_url")
-            ?: primaryJson.optCleanString("bannerUrl")
-            ?: primaryJson.optCleanString("background")
-            ?: bannerObj?.optCleanString("extraLarge")
-            ?: bannerObj?.optCleanString("large")
-            ?: bannerObj?.optCleanString("url")
-            ?: artworkObj?.optCleanString("banner")
-            ?: artworkObj?.optCleanString("background")
-        val bannerUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(rawBannerUrl) ?: rawBannerUrl
+        val bannerUrl = listOf(
+            primaryJson.opt("bannerImage"),
+            primaryJson.opt("banner_image"),
+            primaryJson.opt("banner"),
+            primaryJson.opt("bannerUrl"),
+            primaryJson.opt("banner_url"),
+            primaryJson.opt("background"),
+            primaryJson.opt("backdrop"),
+            primaryJson.opt("backdropImage"),
+            primaryJson.opt("backdropUrl"),
+            primaryJson.opt("backdrop_url"),
+            artworkContainer?.let { extractRoleFromArtworkContainer(it, BANNER_CONTAINER_KEYS, BANNER_ARRAY_ROLES) },
+            nestedAnime?.takeIf { it !== primaryJson }?.let { sec ->
+                sec.opt("bannerImage")
+                    ?: sec.opt("banner_image")
+                    ?: sec.opt("banner")
+                    ?: sec.opt("bannerUrl")
+                    ?: sec.opt("banner_url")
+                    ?: sec.opt("background")
+                    ?: sec.opt("backdrop")
+                    ?: sec.opt("backdropImage")
+            },
+            secondaryArtworkContainer?.let { extractRoleFromArtworkContainer(it, BANNER_CONTAINER_KEYS, BANNER_ARRAY_ROLES) }
+        ).firstNotNullOfOrNull { extractArtworkUrl(it) }
 
-        val rawLogoUrl = primaryJson.optCleanString("logo_url")
-            ?: primaryJson.optCleanString("logoUrl")
-            ?: artworkObj?.optCleanString("logo")
-        val logoUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(rawLogoUrl) ?: rawLogoUrl
+        val logoUrl = listOf(
+            primaryJson.opt("logo_url"),
+            primaryJson.opt("logoUrl"),
+            (artworkContainer as? JSONObject)?.opt("logo"),
+            (artworkContainer as? JSONObject)?.opt("clearlogo")
+        ).firstNotNullOfOrNull { extractArtworkUrl(it) }
 
         val description = primaryJson.optCleanString("synopsis")
             ?: primaryJson.optCleanString("description")
@@ -544,10 +563,21 @@ object JsonParsers {
                 val title = obj.optCleanString("title")
                     ?: obj.optCleanString("name")
                     ?: extractTitles(obj).let { it.english ?: it.romaji ?: it.native }
-                val rawThumb = obj.optString("thumbnail").takeNonNull()
-                    ?: obj.optString("image").takeNonNull()
-                    ?: obj.optString("thumbnailUrl").takeNonNull()
-                val thumb = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(rawThumb) ?: rawThumb
+                val thumb = listOf(
+                    obj.opt("thumbnail"),
+                    obj.opt("thumbnailUrl"),
+                    obj.opt("thumbnail_url"),
+                    obj.opt("image"),
+                    obj.opt("imageUrl"),
+                    obj.opt("image_url"),
+                    obj.opt("coverImage"),
+                    obj.opt("cover_image"),
+                    obj.opt("still"),
+                    obj.opt("stillUrl"),
+                    obj.opt("still_url"),
+                    obj.opt("images")?.let { extractRoleFromArtworkContainer(it, EPISODE_THUMB_KEYS, EPISODE_ARRAY_ROLES) },
+                    obj.opt("artwork")?.let { extractRoleFromArtworkContainer(it, EPISODE_THUMB_KEYS, EPISODE_ARRAY_ROLES) }
+                ).firstNotNullOfOrNull { extractArtworkUrl(it) }
                 val desc = obj.optString("synopsis").takeNonNull()
                     ?: obj.optString("description").takeNonNull()
                 val duration = obj.optInt("duration", 0).takeIf { it > 0 }
@@ -1337,6 +1367,91 @@ object JsonParsers {
         }.getOrDefault(SkipIntervals())
     }
 
+    private val IMAGE_OBJECT_URL_KEYS = arrayOf(
+        "extraLarge", "large", "original", "url", "src", "href", "medium", "small", "thumb"
+    )
+    private val POSTER_CONTAINER_KEYS = arrayOf(
+        "poster", "posterUrl", "poster_url", "cover", "coverImage", "cover_image", "large", "extraLarge"
+    )
+    private val BANNER_CONTAINER_KEYS = arrayOf(
+        "banner", "bannerUrl", "banner_url", "bannerImage", "banner_image", "backdrop", "backdropUrl", "background", "wide"
+    )
+    private val EPISODE_THUMB_KEYS = arrayOf(
+        "thumbnail", "thumbnailUrl", "thumbnail_url", "still", "image", "imageUrl", "coverImage", "large", "original"
+    )
+    private val POSTER_ARRAY_ROLES = setOf("poster", "cover", "coverimage")
+    private val BANNER_ARRAY_ROLES = setOf("banner", "backdrop", "background", "bannerimage", "wide")
+    private val EPISODE_ARRAY_ROLES = setOf("thumbnail", "still", "image", "episode", "screen")
+    private val LOGO_ROLE_NAMES = setOf("logo", "clearlogo", "titlelogo", "title_logo", "hdmovielogo", "hdtvlogo")
+
+    private fun extractRoleFromArtworkContainer(
+        container: Any,
+        preferredKeys: Array<String>,
+        preferredRoles: Set<String>
+    ): String? {
+        return when (container) {
+            is JSONObject -> {
+                for (key in preferredKeys) {
+                    val value = container.opt(key) ?: continue
+                    val resolved = extractArtworkUrl(value)
+                    if (resolved != null) return resolved
+                }
+                null
+            }
+            is JSONArray -> {
+                var fallbackUrl: String? = null
+                for (i in 0 until container.length()) {
+                    when (val item = container.opt(i)) {
+                        is JSONObject -> {
+                            val role = (item.optCleanString("type")
+                                ?: item.optCleanString("kind")
+                                ?: item.optCleanString("role")
+                                ?: "").lowercase(Locale.ROOT)
+                            if (role in LOGO_ROLE_NAMES) continue
+                            if (role in preferredRoles) {
+                                val matched = extractArtworkUrl(item)
+                                if (matched != null) return matched
+                            }
+                            if (role.isEmpty() && fallbackUrl == null) {
+                                fallbackUrl = extractArtworkUrl(item)
+                            }
+                        }
+                        is String -> {
+                            if (fallbackUrl == null) {
+                                fallbackUrl = extractArtworkUrl(item)
+                            }
+                        }
+                    }
+                }
+                fallbackUrl
+            }
+            else -> extractArtworkUrl(container)
+        }
+    }
+
+    private fun extractArtworkUrl(value: Any?, depth: Int = 0): String? {
+        if (value == null || value === JSONObject.NULL || depth > 2) return null
+        return when (value) {
+            is String -> `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(value.takeCleanString())
+            is JSONObject -> {
+                for (key in IMAGE_OBJECT_URL_KEYS) {
+                    val nested = value.opt(key) ?: continue
+                    val resolved = extractArtworkUrl(nested, depth + 1)
+                    if (resolved != null) return resolved
+                }
+                null
+            }
+            is JSONArray -> {
+                for (i in 0 until value.length()) {
+                    val resolved = extractArtworkUrl(value.opt(i), depth + 1)
+                    if (resolved != null) return resolved
+                }
+                null
+            }
+            else -> null
+        }
+    }
+
     private fun JSONObject.optCleanString(key: String): String? {
         if (!has(key) || isNull(key)) return null
         val raw = opt(key) ?: return null
@@ -1346,7 +1461,12 @@ object JsonParsers {
 
     private fun String?.takeCleanString(): String? {
         val s = this.takeNonNull() ?: return null
-        if (s.equals("undefined", ignoreCase = true)) return null
+        if (s.equals("undefined", ignoreCase = true) ||
+            s.equals("none", ignoreCase = true) ||
+            s.equals("n/a", ignoreCase = true)
+        ) {
+            return null
+        }
         if ((s.startsWith("{") && s.endsWith("}")) ||
             (s.startsWith("[") && s.endsWith("]"))
         ) {

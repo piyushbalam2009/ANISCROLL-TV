@@ -1,6 +1,9 @@
 package `in`.aniscroll.tv.core.network
 
+import android.os.Build
 import com.example.BuildConfig
+import `in`.aniscroll.tv.artwork.ArtworkErrorCategory
+import `in`.aniscroll.tv.artwork.ArtworkType
 import `in`.aniscroll.tv.artwork.LogoLogger
 import `in`.aniscroll.tv.data.remote.AniScrollApi
 import `in`.aniscroll.tv.data.remote.AniSkipApi
@@ -61,8 +64,15 @@ class BoundedRetryInterceptor(
 
 object NetworkModule {
 
-    private const val DEFAULT_USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 14; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 AniScrollTV/1.0"
+    // Native app User-Agent: avoids Cloudflare Bot Fight Mode HTTP 403 challenges triggered by spoofed Chrome UAs
+    private const val DEFAULT_USER_AGENT = "AniScrollTV/1.0 (AndroidTV; OkHttp)"
+
+    internal val imageAcceptHeader: String
+        get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            "image/avif,image/webp,image/png,image/jpeg,image/svg+xml,image/*,*/*;q=0.8"
+        } else {
+            "image/webp,image/png,image/jpeg,image/svg+xml,image/*,*/*;q=0.8"
+        }
 
     /**
      * Shared HTTP connection pool and dispatcher reused across Retrofit API calls, Coil image requests,
@@ -191,14 +201,49 @@ object NetworkModule {
             .writeTimeout(12, TimeUnit.SECONDS)
             .addInterceptor { chain ->
                 val original = chain.request()
-                val upgradedUrl = LogoLogger.normalizeSecureArtworkUrl(original.url.toString())
+                val rawUrl = original.url.toString()
+                val upgradedUrl = LogoLogger.normalizeSecureArtworkUrl(rawUrl)
                 val builder = original.newBuilder()
                     .header("User-Agent", DEFAULT_USER_AGENT)
-                    .header("Accept", "image/avif,image/webp,image/png,image/svg+xml,image/*,*/*;q=0.8")
-                if (upgradedUrl != null && upgradedUrl != original.url.toString()) {
+                    .header("Accept", imageAcceptHeader)
+                if (upgradedUrl != null && upgradedUrl != rawUrl) {
                     builder.url(upgradedUrl)
                 }
-                chain.proceed(builder.build())
+                val response = chain.proceed(builder.build())
+                val contentType = response.header("Content-Type").orEmpty()
+                val contentLength = response.header("Content-Length")?.toLongOrNull()
+
+                if (!response.isSuccessful) {
+                    val (host, sanitizedPath) = LogoLogger.sanitizeUrlForDiagnostics(response.request.url.toString())
+                    val cfMitigated = response.header("Cf-Mitigated")
+                    LogoLogger.w(
+                        "Image HTTP failure status=${response.code} host=$host path=$sanitizedPath " +
+                            "ct=${contentType.ifBlank { "none" }} cfMitigated=${cfMitigated ?: "none"}"
+                    )
+                    return@addInterceptor response
+                }
+
+                // Reject captive-portal / soft-404 HTML payloads or 0-byte bodies so Coil never caches blank images
+                if (contentType.startsWith("text/html", ignoreCase = true) ||
+                    contentType.startsWith("application/json", ignoreCase = true) ||
+                    contentLength == 0L
+                ) {
+                    val reqUrl = response.request.url.toString()
+                    val code = response.code
+                    response.close()
+                    LogoLogger.recordArtworkFailure(
+                        screenName = "NetworkImageClient",
+                        artworkType = ArtworkType.POSTER,
+                        hoshikaId = 0L,
+                        url = reqUrl,
+                        category = ArtworkErrorCategory.UNSUPPORTED_FORMAT,
+                        httpStatus = code,
+                        customReason = "Non-image Content-Type=$contentType len=$contentLength"
+                    )
+                    throw IOException("Invalid non-image response HTTP=$code Content-Type=$contentType")
+                }
+
+                response
             }
             .addInterceptor(BoundedRetryInterceptor(maxRetries = 2, initialDelayMs = 150L))
             .build()

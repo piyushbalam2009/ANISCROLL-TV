@@ -46,6 +46,10 @@ object LogoImageLoader {
     @Volatile
     private var instance: ImageLoader? = null
 
+    fun installShared(imageLoader: ImageLoader) {
+        instance = imageLoader
+    }
+
     fun get(context: Context): ImageLoader {
         return instance ?: synchronized(this) {
             instance ?: create(context.applicationContext).also { instance = it }
@@ -62,7 +66,7 @@ object LogoImageLoader {
             .bitmapConfig(Bitmap.Config.ARGB_8888)
             .allowRgb565(false)
             .crossfade(true)
-            .respectCacheHeaders(false)
+            .respectCacheHeaders(true)
             .diskCachePolicy(CachePolicy.ENABLED)
             .memoryCachePolicy(CachePolicy.ENABLED)
             .memoryCache {
@@ -78,9 +82,11 @@ object LogoImageLoader {
             }
             .eventListener(object : EventListener {
                 override fun onError(request: ImageRequest, result: ErrorResult) {
-                    val host = LogoLogger.extractHost(request.data?.toString())
+                    val (host, sanitizedPath) = LogoLogger.sanitizeUrlForDiagnostics(request.data?.toString())
+                    val (category, httpStatus) = LogoLogger.classifyThrowable(result.throwable)
                     LogoLogger.w(
-                        "Coil logo decode/fetch error host=$host category=${LogoFailureCategory.IMAGE_RENDER_FAILURE.name}: ${result.throwable.message}",
+                        "Coil logo decode/fetch error host=$host path=$sanitizedPath http=${httpStatus ?: "-"} " +
+                            "category=${category.name}: ${result.throwable.message}",
                         result.throwable
                     )
                 }

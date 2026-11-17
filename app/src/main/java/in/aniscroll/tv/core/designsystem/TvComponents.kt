@@ -64,9 +64,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
-import coil.compose.AsyncImage
-import coil.compose.AsyncImagePainter
-import coil.request.ImageRequest
+import `in`.aniscroll.tv.artwork.ArtworkType
+import `in`.aniscroll.tv.core.device.TvDeviceCapabilities
 import `in`.aniscroll.tv.domain.model.Anime
 
 @Composable
@@ -249,15 +248,7 @@ fun TvAnimePosterCard(
     }
 
     val context = LocalContext.current
-    val posterRequest = remember(context, anime.posterUrl) {
-        anime.posterUrl?.takeIf { it.isNotBlank() }?.let { url ->
-            ImageRequest.Builder(context)
-                .data(url)
-                .crossfade(true)
-                .size(320, 480)
-                .build()
-        }
-    }
+    val deviceProfile = remember(context) { TvDeviceCapabilities.getDeviceProfile(context) }
 
     val focusMod = if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier
 
@@ -296,14 +287,17 @@ fun TvAnimePosterCard(
                     shape = RoundedCornerShape(4.dp)
                 )
         ) {
-            if (posterRequest != null) {
-                AsyncImage(
-                    model = posterRequest,
-                    contentDescription = anime.preferredTitle,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
+            TvArtworkImage(
+                primaryUrl = anime.posterUrl,
+                artworkType = ArtworkType.POSTER,
+                screenName = "PosterCard",
+                hoshikaId = anime.hoshikaId,
+                contentDescription = anime.preferredTitle,
+                targetWidthPx = deviceProfile.recommendedPosterWidthPx,
+                targetHeightPx = deviceProfile.recommendedPosterHeightPx,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            ) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()

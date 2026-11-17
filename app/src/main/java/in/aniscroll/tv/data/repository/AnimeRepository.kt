@@ -98,8 +98,10 @@ class AnimeRepository(
                 title = cached?.title ?: cleanTitle,
                 englishTitle = cached?.englishTitle ?: cleanTitle.takeIf { it.isNotBlank() },
                 japaneseTitle = cached?.japaneseTitle,
-                posterUrl = entity.posterUrl ?: cached?.posterUrl,
-                bannerUrl = entity.bannerUrl ?: cached?.bannerUrl,
+                posterUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(entity.posterUrl)
+                    ?: `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(cached?.posterUrl),
+                bannerUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(entity.bannerUrl)
+                    ?: `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(cached?.bannerUrl),
                 logoUrl = entity.logoUrl ?: cached?.logoUrl,
                 releaseYear = entity.releaseYear ?: cached?.releaseYear,
                 status = entity.status ?: cached?.status,
@@ -435,7 +437,7 @@ class AnimeRepository(
             logoUrl = retried?.logoUrl,
             tmdbId = retried?.tmdbId ?: anime.tmdbId
         )
-        cacheAnime(updated)
+        runCatching { cacheAnime(updated) }
         return updated
     }
 
@@ -1014,8 +1016,8 @@ class AnimeRepository(
             englishTitle = cleanEnglish,
             japaneseTitle = cleanJapanese,
             description = description,
-            posterUrl = posterUrl,
-            bannerUrl = bannerUrl,
+            posterUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(posterUrl),
+            bannerUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(bannerUrl),
             logoUrl = logoUrl,
             releaseYear = releaseYear,
             season = season,
@@ -1037,8 +1039,8 @@ class AnimeRepository(
             hoshikaId = entity.hoshikaId,
             anilistId = entity.anilistId,
             animeTitle = resolvedTitle,
-            posterUrl = entity.posterUrl,
-            bannerUrl = entity.bannerUrl,
+            posterUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(entity.posterUrl),
+            bannerUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(entity.bannerUrl),
             logoUrl = entity.logoUrl,
             episodeNumber = entity.episodeNumber,
             language = entity.language,

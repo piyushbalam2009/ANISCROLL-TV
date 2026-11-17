@@ -52,13 +52,13 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import coil.compose.AsyncImage
-import coil.request.CachePolicy
-import coil.request.ImageRequest
 import `in`.aniscroll.tv.artwork.AnimeLogo
+import `in`.aniscroll.tv.artwork.ArtworkType
 import `in`.aniscroll.tv.core.designsystem.SafeFocusRequester
 import `in`.aniscroll.tv.core.designsystem.TvAnimePosterCard
 import `in`.aniscroll.tv.core.designsystem.TvAnimeRowSkeleton
+import `in`.aniscroll.tv.core.designsystem.TvArtworkImage
+import `in`.aniscroll.tv.core.device.TvDeviceCapabilities
 import `in`.aniscroll.tv.core.designsystem.TvColors
 import `in`.aniscroll.tv.core.designsystem.TvContentLoadingCopy
 import `in`.aniscroll.tv.core.designsystem.TvEmptyStateBanner
@@ -464,18 +464,7 @@ private fun HomeHeroSection(
     onLogoLoadFailed: (String) -> Unit
 ) {
     val context = LocalContext.current
-    val artworkUrl = anime.bannerUrl?.takeIf { it.isNotBlank() } ?: anime.posterUrl?.takeIf { it.isNotBlank() }
-    val backdropRequest = remember(context, artworkUrl) {
-        artworkUrl?.let { url ->
-            ImageRequest.Builder(context)
-                .data(url)
-                .crossfade(true)
-                .diskCachePolicy(CachePolicy.ENABLED)
-                .memoryCachePolicy(CachePolicy.ENABLED)
-                .size(1920, 1080)
-                .build()
-        }
-    }
+    val deviceProfile = remember(context) { TvDeviceCapabilities.getDeviceProfile(context) }
 
     val heroButtonFocusModifier = Modifier
         .then(
@@ -499,18 +488,23 @@ private fun HomeHeroSection(
             .background(TvColors.SecondaryBackground)
             .testTag("home_hero_section")
     ) {
-        // Wide Hoshika backdrop artwork constrained and cropped inside hero container
-        if (backdropRequest != null) {
-            AsyncImage(
-                model = backdropRequest,
-                contentDescription = anime.preferredTitle,
-                contentScale = ContentScale.Crop,
-                alignment = Alignment.TopCenter,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag("home_hero_backdrop")
-            )
-        }
+        // Wide Hoshika backdrop artwork (falls back cleanly to poster if banner missing or fails)
+        TvArtworkImage(
+            primaryUrl = anime.bannerUrl,
+            fallbackUrl = anime.posterUrl,
+            artworkType = ArtworkType.BANNER,
+            screenName = "HomeHero",
+            hoshikaId = anime.hoshikaId,
+            contentDescription = anime.preferredTitle,
+            targetWidthPx = deviceProfile.recommendedBannerWidthPx,
+            targetHeightPx = deviceProfile.recommendedBannerHeightPx,
+            contentScale = ContentScale.Crop,
+            alignment = Alignment.TopCenter,
+            modifier = Modifier.fillMaxSize(),
+            imageModifier = Modifier
+                .fillMaxSize()
+                .testTag("home_hero_backdrop")
+        )
 
         // Cinematic dark gradient overlays (left-to-right and top-to-bottom) for contrast
         Box(

@@ -22,13 +22,14 @@ class AppContainer(context: Context) {
     val deviceProfile: TvDeviceProfile = TvDeviceCapabilities.getDeviceProfile(appContext)
 
     init {
-        // Install hardware-tier-tuned Coil ImageLoader (e.g. RGB_565 & 14% heap cap on Fire TV Stick HD)
-        Coil.setImageLoader(
-            TvDeviceCapabilities.createOptimizedImageLoader(
-                context = appContext,
-                profile = deviceProfile
-            )
+        // Install a single hardware-tier-tuned Coil ImageLoader shared across all posters, banners,
+        // episode thumbnails, and title logos to avoid duplicate memory/disk caches on TV devices.
+        val sharedImageLoader = TvDeviceCapabilities.createOptimizedImageLoader(
+            context = appContext,
+            profile = deviceProfile
         )
+        Coil.setImageLoader(sharedImageLoader)
+        `in`.aniscroll.tv.artwork.LogoImageLoader.installShared(sharedImageLoader)
     }
 
     val database: AniScrollDatabase by lazy {

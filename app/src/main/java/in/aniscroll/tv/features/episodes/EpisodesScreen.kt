@@ -60,8 +60,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
+import `in`.aniscroll.tv.artwork.ArtworkType
+import `in`.aniscroll.tv.core.designsystem.TvArtworkImage
 import `in`.aniscroll.tv.core.designsystem.TvColors
 import `in`.aniscroll.tv.core.designsystem.TvContentLoadingCopy
 import `in`.aniscroll.tv.core.designsystem.TvEpisodeListSkeleton
@@ -69,6 +69,7 @@ import `in`.aniscroll.tv.core.designsystem.TvErrorBanner
 import `in`.aniscroll.tv.core.designsystem.TvFocusableButton
 import `in`.aniscroll.tv.core.designsystem.TvSectionLoadingHeader
 import `in`.aniscroll.tv.core.designsystem.TvSelectableChip
+import `in`.aniscroll.tv.core.device.TvDeviceCapabilities
 import `in`.aniscroll.tv.domain.model.Episode
 import `in`.aniscroll.tv.domain.model.WatchProgressItem
 import `in`.aniscroll.tv.features.details.DetailsViewModel
@@ -228,6 +229,7 @@ fun EpisodesScreen(
                             progressItem = progress,
                             isCurrentlyPlaying = isPlaying,
                             focusRequester = focusRequester,
+                            animePosterUrl = state.anime?.posterUrl,
                             onClick = {
                                 lastSelectedEpisodeNumber = episode.number
                                 onPlayEpisode(
@@ -271,7 +273,8 @@ fun EpisodeListRowItem(
     isCurrentlyPlaying: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    focusRequester: FocusRequester? = null
+    focusRequester: FocusRequester? = null,
+    animePosterUrl: String? = null
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
@@ -321,6 +324,9 @@ fun EpisodeListRowItem(
         verticalAlignment = Alignment.CenterVertically
     ) {
         // Thumbnail or Consistent Fallback Box
+        val context = LocalContext.current
+        val deviceProfile = remember(context) { TvDeviceCapabilities.getDeviceProfile(context) }
+
         Box(
             modifier = Modifier
                 .width(148.dp)
@@ -330,18 +336,19 @@ fun EpisodeListRowItem(
                 .border(0.5.dp, TvColors.Divider, RoundedCornerShape(4.dp)),
             contentAlignment = Alignment.Center
         ) {
-            if (!episode.thumbnailUrl.isNullOrBlank()) {
-                AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current)
-                        .data(episode.thumbnailUrl)
-                        .crossfade(true)
-                        .size(320, 180)
-                        .build(),
-                    contentDescription = "Episode ${episode.number}",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
+            TvArtworkImage(
+                primaryUrl = episode.thumbnailUrl,
+                fallbackUrl = animePosterUrl,
+                artworkType = ArtworkType.EPISODE_THUMBNAIL,
+                screenName = "EpisodesList",
+                hoshikaId = episode.hoshikaId,
+                episodeNumber = episode.number,
+                contentDescription = "Episode ${episode.number}",
+                targetWidthPx = deviceProfile.recommendedThumbnailWidthPx,
+                targetHeightPx = deviceProfile.recommendedThumbnailHeightPx,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
                         imageVector = Icons.Default.PlayCircleOutline,
