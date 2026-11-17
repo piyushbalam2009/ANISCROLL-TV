@@ -73,19 +73,22 @@ class LogoRepository(
             val cached = dao.getLogoCache(hoshikaId)
             if (cached != null) {
                 val age = System.currentTimeMillis() - cached.lastUpdated
-                val isValidUrl = !cached.logoUrl.isNullOrBlank() &&
-                    (cached.logoUrl.startsWith("https://") || cached.logoUrl.startsWith("http://")) &&
+                val normalizedCachedUrl = LogoLogger.normalizeSecureArtworkUrl(cached.logoUrl)
+                val isValidUrl = !normalizedCachedUrl.isNullOrBlank() &&
                     cached.validationStatus == "VALID"
 
                 if (isValidUrl && age in 0 until VALID_CACHE_TTL_MS) {
+                    if (normalizedCachedUrl != cached.logoUrl) {
+                        dao.insertLogoCache(cached.copy(logoUrl = normalizedCachedUrl))
+                    }
                     LogoLogger.d(
-                        "HoshikaID=$hoshikaId AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Cache HIT provider=${cached.provider} lang=${cached.language ?: "neutral"} host=${LogoLogger.extractHost(cached.logoUrl)}"
+                        "HoshikaID=$hoshikaId AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Cache HIT provider=${cached.provider} lang=${cached.language ?: "neutral"} host=${LogoLogger.extractHost(normalizedCachedUrl)}"
                     )
                     return LogoInfo(
                         hoshikaId = cached.hoshikaId,
                         tmdbId = cached.tmdbId,
                         provider = cached.provider,
-                        logoUrl = cached.logoUrl,
+                        logoUrl = normalizedCachedUrl,
                         language = cached.language,
                         width = cached.width,
                         height = cached.height,
@@ -106,9 +109,9 @@ class LogoRepository(
             }
         }
 
-        // 2. Step 1: Search & validate TMDB TV series ID
-        val tmdbTvId = runCatching {
-            tmdbLogoProvider.resolveVerifiedTmdbTvId(anime)
+        // 2. Step 1: Resolve TMDB media ID (pre-known or search)
+        val initialResolved = runCatching {
+            tmdbLogoProvider.resolveVerifiedTmdbMedia(anime)
         }.onFailure { e ->
             LogoLogger.e(
                 "HoshikaID=$hoshikaId AniListID=${anime.anilistId} TMDB ID resolution error: ${e.message}",
@@ -116,75 +119,115 @@ class LogoRepository(
             )
         }.getOrNull()
 
-        if (tmdbTvId != null && tmdbTvId > 0L) {
-            // 3. Step 2: Retrieve TMDB logos
-            val tmdbLogo = runCatching {
-                tmdbLogoProvider.fetchBestLogoForTvId(
-                    hoshikaId = hoshikaId,
-                    tvId = tmdbTvId,
-                    excludedUrls = excludedUrls,
-                    anilistId = anime.anilistId
-                )
-            }.onFailure { e ->
-                LogoLogger.e(
-                    "HoshikaID=$hoshikaId AniListID=${anime.anilistId} TMDB logo fetch error for tvId=$tmdbTvId: ${e.message}",
-                    e
-                )
-            }.getOrNull()
-
-            if (tmdbLogo != null && !tmdbLogo.logoUrl.isNullOrBlank()) {
-                saveToCache(tmdbLogo)
-                LogoLogger.i(
-                    "HoshikaID=$hoshikaId AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Resolved via provider=TMDB lang=${tmdbLogo.language ?: "neutral"} host=${LogoLogger.extractHost(tmdbLogo.logoUrl)}"
-                )
-                return tmdbLogo
-            }
-
-            // 4. Step 3: Fallback to Fanart.tv (`hdtvlogo`) using the validated TMDB TV ID
-            LogoLogger.i(
-                "HoshikaID=$hoshikaId AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Falling back from TMDB to Fanart.tv for tmdbTvId=$tmdbTvId"
+        if (initialResolved != null && initialResolved.id > 0L) {
+            val directLogo = tryResolveDirectLogo(
+                anime = anime,
+                mediaId = initialResolved.id,
+                isMovie = initialResolved.isMovie,
+                excludedUrls = excludedUrls
             )
-            val fanartLogo = runCatching {
-                fanartLogoProvider.fetchFallbackLogo(
-                    hoshikaId = hoshikaId,
-                    tmdbTvId = tmdbTvId,
-                    excludedUrls = excludedUrls,
-                    anilistId = anime.anilistId
-                )
-            }.onFailure { e ->
-                LogoLogger.e(
-                    "HoshikaID=$hoshikaId AniListID=${anime.anilistId} Fanart logo fetch error for tvId=$tmdbTvId: ${e.message}",
-                    e
-                )
-            }.getOrNull()
-
-            if (fanartLogo != null && !fanartLogo.logoUrl.isNullOrBlank()) {
-                saveToCache(fanartLogo)
-                LogoLogger.i(
-                    "HoshikaID=$hoshikaId AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Resolved via provider=FANART lang=${fanartLogo.language ?: "neutral"} host=${LogoLogger.extractHost(fanartLogo.logoUrl)}"
-                )
-                return fanartLogo
+            if (directLogo != null) {
+                saveToCache(directLogo)
+                return directLogo
             }
-        } else {
-            // Try backend /api/tmdb/anime route if direct TMDB ID resolution wasn't available
-            val backendLogo = runCatching {
-                tmdbLogoProvider.fetchBackendTmdbArtworkLogo(anime, excludedUrls)
-            }.getOrNull()
-            if (backendLogo != null && !backendLogo.logoUrl.isNullOrBlank()) {
-                saveToCache(backendLogo)
-                return backendLogo
+
+            // If a pre-verified tmdbId failed on both TMDB and Fanart, try title-based search once
+            if (initialResolved.fromKnownId) {
+                val searchedMedia = runCatching { tmdbLogoProvider.searchAndVerifyMedia(anime) }.getOrNull()
+                if (searchedMedia != null &&
+                    (searchedMedia.id != initialResolved.id || searchedMedia.isMovie != initialResolved.isMovie)
+                ) {
+                    val searchedLogo = tryResolveDirectLogo(
+                        anime = anime,
+                        mediaId = searchedMedia.id,
+                        isMovie = searchedMedia.isMovie,
+                        excludedUrls = excludedUrls
+                    )
+                    if (searchedLogo != null) {
+                        saveToCache(searchedLogo)
+                        return searchedLogo
+                    }
+                }
             }
         }
 
-        // 5. Step 4: Both failed or returned no logos -> Do NOT cache failure in Room; return null for clean text fallback
+        // 3. Always attempt AniScroll backend /api/tmdb/anime proxy fallback if direct TMDB and Fanart failed or lacked credentials
+        val backendLogo = runCatching {
+            tmdbLogoProvider.fetchBackendTmdbArtworkLogo(anime, excludedUrls)
+        }.getOrNull()
+        if (backendLogo != null && !backendLogo.logoUrl.isNullOrBlank()) {
+            saveToCache(backendLogo)
+            LogoLogger.i(
+                "HoshikaID=$hoshikaId AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Final selected provider=TMDB_BACKEND host=${LogoLogger.extractHost(backendLogo.logoUrl)}"
+            )
+            return backendLogo
+        }
+
+        // 4. Both failed or returned no logos -> Do NOT cache failure in Room; return null for clean text fallback
         LogoLogger.i(
-            "HoshikaID=$hoshikaId AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Fallback reason: No valid logo from TMDB or Fanart.tv; displaying text fallback"
+            "HoshikaID=$hoshikaId AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Final selected provider=TEXT_FALLBACK (TMDB and Fanart.tv unavailable or returned no logos)"
         )
         return null
     }
 
+    private suspend fun tryResolveDirectLogo(
+        anime: Anime,
+        mediaId: Long,
+        isMovie: Boolean,
+        excludedUrls: Set<String>
+    ): LogoInfo? {
+        val hoshikaId = anime.hoshikaId
+        val tmdbLogo = runCatching {
+            tmdbLogoProvider.fetchBestLogoForMediaId(
+                hoshikaId = hoshikaId,
+                mediaId = mediaId,
+                isMovie = isMovie,
+                excludedUrls = excludedUrls,
+                anilistId = anime.anilistId
+            )
+        }.onFailure { e ->
+            LogoLogger.e(
+                "HoshikaID=$hoshikaId AniListID=${anime.anilistId} TMDB logo fetch error for mediaId=$mediaId: ${e.message}",
+                e
+            )
+        }.getOrNull()
+
+        if (tmdbLogo != null && !tmdbLogo.logoUrl.isNullOrBlank()) {
+            LogoLogger.i(
+                "HoshikaID=$hoshikaId AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Final selected provider=TMDB lang=${tmdbLogo.language ?: "neutral"} host=${LogoLogger.extractHost(tmdbLogo.logoUrl)}"
+            )
+            return tmdbLogo
+        }
+
+        LogoLogger.i(
+            "HoshikaID=$hoshikaId AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Falling back from TMDB to Fanart.tv for mediaId=$mediaId"
+        )
+        val fanartLogo = runCatching {
+            fanartLogoProvider.fetchFallbackLogo(
+                hoshikaId = hoshikaId,
+                tmdbTvId = mediaId,
+                excludedUrls = excludedUrls,
+                anilistId = anime.anilistId,
+                isMovie = isMovie
+            )
+        }.onFailure { e ->
+            LogoLogger.e(
+                "HoshikaID=$hoshikaId AniListID=${anime.anilistId} Fanart logo fetch error for mediaId=$mediaId: ${e.message}",
+                e
+            )
+        }.getOrNull()
+
+        if (fanartLogo != null && !fanartLogo.logoUrl.isNullOrBlank()) {
+            LogoLogger.i(
+                "HoshikaID=$hoshikaId AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Final selected provider=FANART lang=${fanartLogo.language ?: "neutral"} host=${LogoLogger.extractHost(fanartLogo.logoUrl)}"
+            )
+            return fanartLogo
+        }
+        return null
+    }
+
     /**
-     * Called when a cached or supplied logo URL fails to load in Coil (Section 9):
+     * Called when a cached or supplied logo URL fails to load in Coil:
      * 1. Invalidates the bad cache entry in Room.
      * 2. Records the failed URL in the exclusion set for this anime.
      * 3. Retries TMDB (excluding all failed URLs).
@@ -196,6 +239,10 @@ class LogoRepository(
             "HoshikaID=${anime.hoshikaId} AniListID=${anime.anilistId} title='${anime.preferredTitle}' -> Invalidating failed logo host=${LogoLogger.extractHost(failedUrl)} and retrying providers"
         )
         dao.deleteLogoCache(anime.hoshikaId)
+        val normalizedFailed = LogoLogger.normalizeSecureArtworkUrl(failedUrl)
+        if (!normalizedFailed.isNullOrBlank() && normalizedFailed != failedUrl) {
+            failedUrlsByAnime.getOrPut(anime.hoshikaId) { ConcurrentHashMap.newKeySet() }.add(normalizedFailed)
+        }
         return getLogoInfoForAnime(
             anime = anime.copy(logoUrl = null),
             forceRefresh = true,
@@ -225,3 +272,4 @@ class LogoRepository(
         )
     }
 }
+

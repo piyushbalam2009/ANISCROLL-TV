@@ -38,7 +38,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
@@ -57,12 +56,15 @@ import coil.compose.AsyncImage
 import coil.request.CachePolicy
 import coil.request.ImageRequest
 import `in`.aniscroll.tv.artwork.AnimeLogo
+import `in`.aniscroll.tv.core.designsystem.SafeFocusRequester
 import `in`.aniscroll.tv.core.designsystem.TvAnimePosterCard
 import `in`.aniscroll.tv.core.designsystem.TvAnimeRowSkeleton
 import `in`.aniscroll.tv.core.designsystem.TvColors
 import `in`.aniscroll.tv.core.designsystem.TvContentLoadingCopy
 import `in`.aniscroll.tv.core.designsystem.TvEmptyStateBanner
 import `in`.aniscroll.tv.core.designsystem.TvErrorBanner
+import `in`.aniscroll.tv.core.designsystem.rememberSafeFocusRequester
+import `in`.aniscroll.tv.core.designsystem.safeFocusRequester
 import `in`.aniscroll.tv.core.designsystem.TvFocusableButton
 import `in`.aniscroll.tv.core.designsystem.TvHomeLoadingSkeleton
 import `in`.aniscroll.tv.core.designsystem.TvSectionLoadingHeader
@@ -224,8 +226,8 @@ fun HomeScreen(
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
 
-    val heroPlayFocusRequester = remember { FocusRequester() }
-    val firstRowFirstCardFocusRequester = remember { FocusRequester() }
+    val heroPlayFocusRequester = rememberSafeFocusRequester()
+    val firstRowFirstCardFocusRequester = rememberSafeFocusRequester()
     var hasRequestedInitialHeroFocus by rememberSaveable { mutableStateOf(false) }
 
     BoxWithConstraints(
@@ -403,7 +405,10 @@ fun HomeScreen(
                             items = state.sections,
                             key = { index, section -> "section_${index}_${section.title}" }
                         ) { rowIndex, section ->
-                            val isFirstContentRowBelowHero = !hasContinueWatchingRow && rowIndex == 0
+                            val firstNonEmptySectionIndex = state.sections.indexOfFirst { it.items.isNotEmpty() }
+                            val isFirstContentRowBelowHero = !hasContinueWatchingRow &&
+                                firstNonEmptySectionIndex >= 0 &&
+                                rowIndex == firstNonEmptySectionIndex
                             HomeAnimeContentRow(
                                 title = section.title,
                                 items = section.items,
@@ -427,10 +432,14 @@ fun HomeScreen(
                     }
                 }
 
-                LaunchedEffect(state.featuredAnime?.hoshikaId) {
-                    if (!hasRequestedInitialHeroFocus && !state.shouldRestoreCardFocus && state.featuredAnime != null) {
+                LaunchedEffect(state.featuredAnime?.hoshikaId, heroPlayFocusRequester.isAttached) {
+                    if (!hasRequestedInitialHeroFocus &&
+                        !state.shouldRestoreCardFocus &&
+                        state.featuredAnime != null &&
+                        heroPlayFocusRequester.isAttached
+                    ) {
                         hasRequestedInitialHeroFocus = true
-                        runCatching { heroPlayFocusRequester.requestFocus() }
+                        heroPlayFocusRequester.requestFocusSafely()
                     }
                 }
             }
@@ -446,8 +455,8 @@ private fun HomeHeroSection(
     contentMaxWidth: Dp,
     logoMaxWidth: Dp,
     logoMaxHeight: Dp,
-    playFocusRequester: FocusRequester,
-    downFocusRequester: FocusRequester?,
+    playFocusRequester: SafeFocusRequester,
+    downFocusRequester: SafeFocusRequester?,
     onHeroFocused: () -> Unit,
     onPlay: () -> Unit,
     onDetails: () -> Unit,
@@ -471,7 +480,7 @@ private fun HomeHeroSection(
     val heroButtonFocusModifier = Modifier
         .then(
             if (downFocusRequester != null) {
-                Modifier.focusProperties { down = downFocusRequester }
+                Modifier.focusProperties { down = downFocusRequester.orDefault() }
             } else {
                 Modifier
             }
@@ -602,9 +611,10 @@ private fun HomeHeroSection(
                     text = "Play",
                     icon = Icons.Default.PlayArrow,
                     isPrimary = true,
-                    focusRequester = playFocusRequester,
                     onClick = onPlay,
-                    modifier = heroButtonFocusModifier.testTag("hero_play_button")
+                    modifier = heroButtonFocusModifier
+                        .safeFocusRequester(playFocusRequester)
+                        .testTag("hero_play_button")
                 )
                 TvFocusableButton(
                     text = "Details",
@@ -626,8 +636,8 @@ private fun HomeHeroSection(
 @Composable
 private fun ContinueWatchingHomeRow(
     items: List<WatchProgressItem>,
-    firstCardFocusRequester: FocusRequester?,
-    upFocusRequester: FocusRequester?,
+    firstCardFocusRequester: SafeFocusRequester?,
+    upFocusRequester: SafeFocusRequester?,
     onResumeItem: (WatchProgressItem) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -655,18 +665,27 @@ private fun ContinueWatchingHomeRow(
                     bannerUrl = item.bannerUrl,
                     logoUrl = item.logoUrl
                 )
-                val upMod = if (upFocusRequester != null) {
-                    Modifier.focusProperties { up = upFocusRequester }
-                } else {
-                    Modifier
-                }
+                val cardFocusMod = Modifier
+                    .then(
+                        if (upFocusRequester != null) {
+                            Modifier.focusProperties { up = upFocusRequester.orDefault() }
+                        } else {
+                            Modifier
+                        }
+                    )
+                    .then(
+                        if (index == 0 && firstCardFocusRequester != null) {
+                            Modifier.safeFocusRequester(firstCardFocusRequester)
+                        } else {
+                            Modifier
+                        }
+                    )
                 TvAnimePosterCard(
                     anime = cardAnime,
                     subtitleBadge = "EP ${item.episodeNumber} • ${item.language.uppercase()}",
                     progressFraction = item.progressFraction,
-                    focusRequester = if (index == 0) firstCardFocusRequester else null,
                     onClick = { onResumeItem(item) },
-                    modifier = upMod.testTag("continue_watching_card_${item.hoshikaId}")
+                    modifier = cardFocusMod.testTag("continue_watching_card_${item.hoshikaId}")
                 )
             }
         }
@@ -677,8 +696,8 @@ private fun ContinueWatchingHomeRow(
 private fun HomeAnimeContentRow(
     title: String,
     items: List<Anime>,
-    firstCardFocusRequester: FocusRequester?,
-    upFocusRequester: FocusRequester?,
+    firstCardFocusRequester: SafeFocusRequester?,
+    upFocusRequester: SafeFocusRequester?,
     restoredFocusId: Long,
     onConsumeRestoreFocus: () -> Unit,
     onAnimeClick: (Anime) -> Unit,
@@ -704,26 +723,27 @@ private fun HomeAnimeContentRow(
                     if (index == 0 && firstCardFocusRequester != null) {
                         firstCardFocusRequester
                     } else {
-                        FocusRequester()
+                        SafeFocusRequester()
                     }
                 }
-                LaunchedEffect(restoredFocusId) {
-                    if (restoredFocusId == anime.hoshikaId) {
+                LaunchedEffect(restoredFocusId, cardFocusRequester.isAttached) {
+                    if (restoredFocusId == anime.hoshikaId && cardFocusRequester.isAttached) {
                         onConsumeRestoreFocus()
-                        runCatching { cardFocusRequester.requestFocus() }
+                        cardFocusRequester.requestFocusSafely()
                     }
                 }
                 val upMod = if (upFocusRequester != null) {
-                    Modifier.focusProperties { up = upFocusRequester }
+                    Modifier.focusProperties { up = upFocusRequester.orDefault() }
                 } else {
                     Modifier
                 }
                 TvAnimePosterCard(
                     anime = anime,
-                    focusRequester = cardFocusRequester,
                     onClick = { onAnimeClick(anime) },
                     onFocused = { onAnimeFocused(anime) },
-                    modifier = upMod.testTag("home_card_${anime.hoshikaId}")
+                    modifier = upMod
+                        .safeFocusRequester(cardFocusRequester)
+                        .testTag("home_card_${anime.hoshikaId}")
                 )
             }
         }

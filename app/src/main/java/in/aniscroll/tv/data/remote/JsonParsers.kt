@@ -238,7 +238,7 @@ object JsonParsers {
         val bannerObj = primaryJson.optJSONObject("bannerImage")
             ?: primaryJson.optJSONObject("banner")
 
-        val posterUrl = primaryJson.optCleanString("coverImage")
+        val rawPosterUrl = primaryJson.optCleanString("coverImage")
             ?: primaryJson.optCleanString("poster")
             ?: primaryJson.optCleanString("poster_url")
             ?: primaryJson.optCleanString("posterUrl")
@@ -250,8 +250,9 @@ object JsonParsers {
             ?: coverObj?.optCleanString("url")
             ?: artworkObj?.optCleanString("poster")
             ?: artworkObj?.optCleanString("large")
+        val posterUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(rawPosterUrl) ?: rawPosterUrl
 
-        val bannerUrl = primaryJson.optCleanString("bannerImage")
+        val rawBannerUrl = primaryJson.optCleanString("bannerImage")
             ?: primaryJson.optCleanString("banner")
             ?: primaryJson.optCleanString("banner_url")
             ?: primaryJson.optCleanString("bannerUrl")
@@ -261,10 +262,12 @@ object JsonParsers {
             ?: bannerObj?.optCleanString("url")
             ?: artworkObj?.optCleanString("banner")
             ?: artworkObj?.optCleanString("background")
+        val bannerUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(rawBannerUrl) ?: rawBannerUrl
 
-        val logoUrl = primaryJson.optCleanString("logo_url")
+        val rawLogoUrl = primaryJson.optCleanString("logo_url")
             ?: primaryJson.optCleanString("logoUrl")
             ?: artworkObj?.optCleanString("logo")
+        val logoUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(rawLogoUrl) ?: rawLogoUrl
 
         val description = primaryJson.optCleanString("synopsis")
             ?: primaryJson.optCleanString("description")

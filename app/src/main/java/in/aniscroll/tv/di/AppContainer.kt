@@ -50,14 +50,16 @@ class AppContainer(context: Context) {
     val tmdbLogoProvider: TmdbLogoProvider by lazy {
         TmdbLogoProvider(
             tmdbApi = NetworkModule.tmdbApi,
-            aniScrollApi = NetworkModule.aniScrollApi
+            aniScrollApi = NetworkModule.aniScrollApi,
+            tmdbMovieApi = NetworkModule.tmdbMovieApi
         )
     }
 
     val fanartLogoProvider: FanartLogoProvider by lazy {
         FanartLogoProvider(
             fanartApi = NetworkModule.fanartApi,
-            aniScrollApi = NetworkModule.aniScrollApi
+            aniScrollApi = NetworkModule.aniScrollApi,
+            fanartMovieApi = NetworkModule.fanartMovieApi
         )
     }
 

@@ -94,6 +94,8 @@ class SettingsViewModel(
             runCatching {
                 context.imageLoader.memoryCache?.clear()
                 context.imageLoader.diskCache?.clear()
+                `in`.aniscroll.tv.artwork.LogoImageLoader.get(context).memoryCache?.clear()
+                `in`.aniscroll.tv.artwork.LogoImageLoader.get(context).diskCache?.clear()
             }
         }
     }
@@ -119,6 +121,8 @@ class SettingsViewModel(
             runCatching {
                 context.imageLoader.memoryCache?.clear()
                 context.imageLoader.diskCache?.clear()
+                `in`.aniscroll.tv.artwork.LogoImageLoader.get(context).memoryCache?.clear()
+                `in`.aniscroll.tv.artwork.LogoImageLoader.get(context).diskCache?.clear()
             }
         }
     }

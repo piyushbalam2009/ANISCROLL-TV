@@ -2,14 +2,22 @@ package com.example
 
 import android.content.Context
 import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.unit.dp
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import `in`.aniscroll.tv.core.designsystem.rememberSafeFocusRequester
 import `in`.aniscroll.tv.artwork.FanartLogoProvider
 import `in`.aniscroll.tv.artwork.LogoRepository
 import `in`.aniscroll.tv.artwork.TmdbLogoProvider
@@ -225,6 +233,103 @@ class PlayerAndSearchRobolectricTest {
         assertTrue(viewModel.uiState.value.results.isEmpty())
     }
 
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun searchScreen_compactHeaderAndRecentSearches_maximizesResultsGridHeight() = runTest {
+        val sampleResultsJson = (1..10).joinToString(",") { idx ->
+            """
+                {
+                  "shortId": ${9000 + idx},
+                  "titleRomaji": "Anime Title $idx",
+                  "titleEnglish": "Anime Title $idx",
+                  "format": "TV",
+                  "seasonYear": 2024
+                }
+            """.trimIndent()
+        }
+        val fakeHoshika = FakeHoshikaApi(
+            dynamicSearchHandler = {
+                """{ "ok": true, "anime": [$sampleResultsJson] }"""
+            }
+        )
+        val repo = createAnimeRepository(fakeHoshika, FakeAniScrollApi())
+        val viewModel = SearchViewModel(repo)
+
+        composeTestRule.setContent {
+            `in`.aniscroll.tv.features.search.SearchScreen(
+                viewModel = viewModel,
+                onOpenAnimeDetails = {}
+            )
+        }
+        composeTestRule.waitForIdle()
+
+        // 1. No recent searches -> Recent Searches section does not exist and reserves zero space
+        composeTestRule.onNodeWithTag("search_recent_section").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("search_screen_heading").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("search_bar_row").assertIsDisplayed()
+
+        // 2. Populate 8 recent search queries -> compact row caps initial chips to 6 + "+2 more" chip
+        listOf("Bleach", "Jujutsu Kaisen", "Frieren", "Attack on Titan", "One Piece", "Naruto", "Solo Leveling", "Demon Slayer")
+            .forEach { repo.saveSearchQuery(it) }
+
+        composeTestRule.waitUntil(timeoutMillis = 5000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            viewModel.searchHistory.value.size == 8
+        }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("search_recent_section").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("search_clear_history_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("search_recent_more_chip").assertIsDisplayed()
+        composeTestRule.onNodeWithText("+2 more").assertIsDisplayed()
+
+        // Verify compact vertical footprint of recent searches strip (single compact row, not stacked)
+        val recentBounds = composeTestRule.onNodeWithTag("search_recent_section").getBoundsInRoot()
+        val recentHeightDp = recentBounds.bottom - recentBounds.top
+        assertTrue("Recent searches row should stay compact (was $recentHeightDp)", recentHeightDp <= 60.dp)
+
+        // Clicking "+2 more" expands remaining chips and hides the overflow chip
+        composeTestRule.onNodeWithTag("search_recent_more_chip").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("search_recent_more_chip").assertDoesNotExist()
+        composeTestRule.onNodeWithText("Bleach").assertIsDisplayed()
+
+        // 3. Trigger a search via query/recent selection and verify Search Results start high on screen
+        viewModel.selectHistoryQuery("Solo Leveling")
+        composeTestRule.waitUntil(timeoutMillis = 5000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            viewModel.uiState.value.results.size == 10 && !viewModel.uiState.value.isLoading
+        }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("search_clear_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("search_results_grid").assertIsDisplayed()
+
+        val gridBounds = composeTestRule.onNodeWithTag("search_results_grid").getBoundsInRoot()
+        assertTrue("Results grid should start in upper ~30% of 720dp screen (top=${gridBounds.top})", gridBounds.top <= 220.dp)
+        assertTrue("Results grid should have ample height (height=${gridBounds.bottom - gridBounds.top})", (gridBounds.bottom - gridBounds.top) >= 450.dp)
+
+        // Multiple poster cards fit side-by-side on row 1
+        composeTestRule.onNodeWithTag("search_result_card_9001").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("search_result_card_9006").assertIsDisplayed()
+
+        // D-pad navigation down from search bar works cleanly
+        composeTestRule.onNodeWithTag("search_input_field").performKeyInput {
+            pressKey(Key.DirectionDown)
+            pressKey(Key.DirectionDown)
+        }
+        composeTestRule.waitForIdle()
+
+        // 4. Clear History removes all saved queries and collapses the Recent Searches area completely
+        composeTestRule.onNodeWithTag("search_clear_history_button").performClick()
+        composeTestRule.waitUntil(timeoutMillis = 5000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            viewModel.searchHistory.value.isEmpty()
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("search_recent_section").assertDoesNotExist()
+    }
+
     @Test
     fun homeScreen_rendersHeroSectionAndTitleLogoWithinBounds() = runTest {
         val fakeHoshika = FakeHoshikaApi(
@@ -281,6 +386,169 @@ class PlayerAndSearchRobolectricTest {
         composeTestRule.onNodeWithTag("hero_play_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("hero_details_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("hero_watchlist_button").assertIsDisplayed()
+    }
+
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun homeScreenDpadNavigation_neverThrowsUninitializedFocusRequester() = runTest {
+        val fakeHoshika = FakeHoshikaApi(
+            homeJson = """
+                {
+                  "ok": true,
+                  "trending": [
+                    {
+                      "shortId": 83885,
+                      "titleRomaji": "Ore dake Level Up na Ken",
+                      "titleEnglish": "Solo Leveling",
+                      "bannerImage": "https://cdn.hoshika.app/catalog/banners/anime/83885.webp",
+                      "coverImage": "https://cdn.hoshika.app/catalog/covers/anime/83885.webp",
+                      "format": "TV",
+                      "seasonYear": 2024
+                    },
+                    {
+                      "shortId": 41391,
+                      "titleRomaji": "Naruto",
+                      "titleEnglish": "Naruto",
+                      "coverImage": "https://cdn.hoshika.app/catalog/covers/anime/41391.webp",
+                      "format": "TV",
+                      "seasonYear": 2002
+                    }
+                  ],
+                  "popular": [
+                    {
+                      "shortId": 21,
+                      "titleRomaji": "One Piece",
+                      "titleEnglish": "One Piece",
+                      "coverImage": "https://cdn.hoshika.app/catalog/covers/anime/21.webp",
+                      "format": "TV",
+                      "seasonYear": 1999
+                    }
+                  ]
+                }
+            """.trimIndent()
+        )
+        val repo = createAnimeRepository(fakeHoshika, FakeAniScrollApi())
+        val homeViewModel = HomeViewModel(repo)
+
+        composeTestRule.setContent {
+            HomeScreen(
+                viewModel = homeViewModel,
+                onOpenAnimeDetails = {},
+                onPlayEpisode = { _, _, _ -> }
+            )
+        }
+
+        composeTestRule.waitUntil(timeoutMillis = 5000) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            !homeViewModel.uiState.value.isLoading
+        }
+        composeTestRule.waitForIdle()
+
+        // Navigate across Hero buttons and down/up into rows without crashing
+        composeTestRule.onNodeWithTag("hero_play_button").assertIsFocused()
+        composeTestRule.onNodeWithTag("hero_play_button").performKeyInput {
+            pressKey(Key.DirectionRight)
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("hero_details_button").assertIsFocused()
+        composeTestRule.onNodeWithTag("hero_details_button").performKeyInput {
+            pressKey(Key.DirectionDown)
+        }
+        composeTestRule.waitForIdle()
+
+        // Scroll Home LazyColumn far down so the Hero section is detached, then press DirectionUp
+        composeTestRule.onNodeWithTag("home_lazy_column").performScrollToIndex(2)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("home_card_21").performKeyInput {
+            pressKey(Key.DirectionUp)
+            pressKey(Key.DirectionUp)
+        }
+        composeTestRule.waitForIdle()
+    }
+
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun playerControlsDpadNavigation_neverThrowsUninitializedFocusRequester() {
+        val progressFlow = MutableStateFlow(
+            PlaybackProgressState(
+                currentPositionMs = 40_000L,
+                bufferedPositionMs = 120_000L,
+                durationMs = 1_440_000L
+            )
+        )
+        val showSkipButton = androidx.compose.runtime.mutableStateOf(false)
+        val showControls = androidx.compose.runtime.mutableStateOf(true)
+
+        composeTestRule.setContent {
+            val playPauseSafe = rememberSafeFocusRequester()
+            val skipSafe = rememberSafeFocusRequester()
+            Box {
+                if (showControls.value) {
+                    PlayerControlsOverlay(
+                        animeTitle = "Solo Leveling",
+                        episodeNumber = 1,
+                        episodeTitle = "I'm Used to It",
+                        audioLanguage = "sub",
+                        isPlaying = true,
+                        hasPreviousEpisode = false,
+                        hasNextEpisode = true,
+                        progressStateFlow = progressFlow,
+                        activePanel = PlayerSettingsPanel.NONE,
+                        canInteract = true,
+                        lastFocusTarget = PlayerFocusTarget.PLAY_PAUSE,
+                        onFocusTargetChanged = {},
+                        onUserActivity = {},
+                        onBackClick = {},
+                        onPreviousEpisode = {},
+                        onSeekRelative = {},
+                        onTogglePlayPause = {},
+                        onNextEpisode = {},
+                        onToggleAudioLanguage = {},
+                        onOpenSubtitlesPanel = {},
+                        playPauseSafeFocusRequester = playPauseSafe,
+                        // Intentionally pass an unattached skipSafe requester while SkipIntroOutroButton is absent
+                        skipButtonSafeFocusRequester = skipSafe
+                    )
+                }
+                if (showSkipButton.value) {
+                    `in`.aniscroll.tv.player.SkipIntroOutroButton(
+                        prompt = `in`.aniscroll.tv.player.ActiveSkipPrompt(
+                            type = `in`.aniscroll.tv.player.ActiveSkipType.INTRO,
+                            label = "Skip Intro",
+                            targetTimeMs = 90_000L
+                        ),
+                        safeFocusRequester = skipSafe,
+                        // Intentionally pass playPauseSafe even if controls flip off
+                        controlsSafeFocusRequester = playPauseSafe,
+                        onClick = {}
+                    )
+                }
+            }
+        }
+        composeTestRule.waitForIdle()
+
+        // Dispatch D-pad keys while skipSafe is unattached -> must fall back safely without IllegalStateException
+        composeTestRule.onNodeWithTag("player_seek_forward").performKeyInput {
+            pressKey(Key.DirectionDown)
+            pressKey(Key.DirectionRight)
+            pressKey(Key.DirectionLeft)
+        }
+        composeTestRule.onNodeWithTag("player_timeline_bar").performKeyInput {
+            pressKey(Key.DirectionUp)
+            pressKey(Key.DirectionDown)
+        }
+        composeTestRule.waitForIdle()
+
+        // Flip: Skip button visible, controls hidden -> pressing DirectionLeft/Up/Down must not crash
+        showControls.value = false
+        showSkipButton.value = true
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("player_aniskip_button").performKeyInput {
+            pressKey(Key.DirectionLeft)
+            pressKey(Key.DirectionUp)
+            pressKey(Key.DirectionDown)
+        }
+        composeTestRule.waitForIdle()
     }
 
     @Test

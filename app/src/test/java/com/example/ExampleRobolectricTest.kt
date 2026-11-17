@@ -9,15 +9,20 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import `in`.aniscroll.tv.artwork.AnimeLogo
 import `in`.aniscroll.tv.artwork.FanartLogoProvider
+import `in`.aniscroll.tv.artwork.LogoFailureCategory
 import `in`.aniscroll.tv.artwork.LogoImageLoader
+import `in`.aniscroll.tv.artwork.LogoLogger
 import `in`.aniscroll.tv.artwork.LogoRepository
 import `in`.aniscroll.tv.artwork.TmdbLogoProvider
 import `in`.aniscroll.tv.core.database.AniScrollDao
 import `in`.aniscroll.tv.core.database.AniScrollDatabase
 import `in`.aniscroll.tv.core.database.LogoCacheEntity
 import `in`.aniscroll.tv.core.network.NetworkModule
+import `in`.aniscroll.tv.data.remote.AniScrollApi
 import `in`.aniscroll.tv.data.remote.FanartApi
+import `in`.aniscroll.tv.data.remote.FanartMovieApi
 import `in`.aniscroll.tv.data.remote.TmdbApi
+import `in`.aniscroll.tv.data.remote.TmdbMovieApi
 import `in`.aniscroll.tv.domain.model.Anime
 import kotlinx.coroutines.test.runTest
 import okhttp3.MediaType.Companion.toMediaType
@@ -394,6 +399,210 @@ class ExampleRobolectricTest {
         assertEquals(2, fakeTmdb.imagesRequestCount)
     }
 
+    // TEST 10: Fanart cleartext http:// URLs & Room cached http:// URLs upgrade to https:// for release APKs
+    @Test
+    fun test10_cleartextFanartAndCachedUrls_upgradeToHttpsForAndroid9PlusApk() = runTest {
+        val fakeTmdb = FakeTmdbApi(
+            searchBody = tmdbSearchPayload(1429L, "Attack on Titan", "進撃の巨人", "2013-04-07"),
+            imagesBody = """{ "id": 1429, "logos": [] }"""
+        )
+        val fakeFanart = FakeFanartApi(
+            fanartBody = """
+                {
+                  "name": "Attack on Titan",
+                  "hdtvlogo": [
+                    { "id": "39467", "url": "http://assets.fanart.tv/fanart/tv/267440/hdtvlogo/aot-cleartext.png", "lang": "en", "likes": "20", "width": "800", "height": "310" }
+                  ]
+                }
+            """.trimIndent()
+        )
+        val repo = createLogoRepository(fakeTmdb, fakeFanart)
+
+        val info = repo.getLogoInfoForAnime(sampleAotAnime())
+        assertNotNull(info)
+        assertEquals("FANART", info!!.provider)
+        assertEquals("https://assets.fanart.tv/fanart/tv/267440/hdtvlogo/aot-cleartext.png", info.logoUrl)
+
+        // Also verify an older Room-cached http:// Fanart URL upgrades cleanly to https:// on read
+        val cachedAnime = sampleAotAnime().copy(hoshikaId = 77777L)
+        dao.insertLogoCache(
+            LogoCacheEntity(
+                hoshikaId = cachedAnime.hoshikaId,
+                tmdbId = 1429L,
+                provider = "FANART",
+                logoUrl = "http://assets.fanart.tv/fanart/tv/old-entry.png",
+                language = "en",
+                width = 800,
+                height = 310,
+                validationStatus = "VALID",
+                lastUpdated = System.currentTimeMillis()
+            )
+        )
+        val cachedInfo = repo.getLogoInfoForAnime(cachedAnime)
+        assertNotNull(cachedInfo)
+        assertEquals("https://assets.fanart.tv/fanart/tv/old-entry.png", cachedInfo!!.logoUrl)
+    }
+
+    // TEST 11: Backend /api/tmdb/anime fallback works even when anime.tmdbId != null and client keys are missing or 401
+    @Test
+    fun test11_backendTmdbFallback_worksWhenTmdbIdKnownAndClientCredentialsMissingOrUnauthorized() = runTest {
+        val fakeTmdb = FakeTmdbApi(searchBody = null, imagesBody = null)
+        val fakeFanart = FakeFanartApi(fanartBody = null, statusCode = 401)
+        val fakeAniScroll = FakeBackendArtworkApi(
+            responseJson = """{ "ok": true, "data": { "logo": "http://image.tmdb.org/t/p/original/backend_fallback.png" } }"""
+        )
+
+        val repo = LogoRepository(
+            dao = dao,
+            tmdbLogoProvider = TmdbLogoProvider(
+                tmdbApi = fakeTmdb,
+                aniScrollApi = fakeAniScroll,
+                hasValidCredentials = { false }
+            ),
+            fanartLogoProvider = FanartLogoProvider(
+                fanartApi = fakeFanart,
+                aniScrollApi = fakeAniScroll,
+                hasValidCredentials = { false }
+            )
+        )
+
+        // Anime already carries tmdbId, yet direct keys are missing in release APK
+        val animeWithKnownTmdbId = sampleAotAnime().copy(tmdbId = 1429L, malId = 16498L)
+        val resolved = repo.getLogoInfoForAnime(animeWithKnownTmdbId)
+
+        assertNotNull(resolved)
+        assertEquals("TMDB", resolved!!.provider)
+        assertEquals("https://image.tmdb.org/t/p/original/backend_fallback.png", resolved.logoUrl)
+        assertEquals(1, fakeAniScroll.tmdbArtworkRequests)
+    }
+
+    // TEST 12: Movie format uses TMDB Movie endpoints and Fanart Movie hdmovielogo fallback
+    @Test
+    fun test12_movieFormat_resolvesViaTmdbMovieAndFanartMovieFallback() = runTest {
+        val fakeTmdbTv = FakeTmdbApi(searchBody = null, imagesBody = null)
+        val fakeTmdbMovie = FakeTmdbMovieApi(
+            searchBody = """
+                {
+                  "page": 1,
+                  "results": [
+                    {
+                      "id": 372058,
+                      "title": "Your Name.",
+                      "original_title": "君の名は。",
+                      "release_date": "2016-08-26",
+                      "original_language": "ja",
+                      "genre_ids": [16, 18, 10749]
+                    }
+                  ]
+                }
+            """.trimIndent(),
+            imagesBody = """{ "id": 372058, "logos": [] }"""
+        )
+        val fakeFanartTv = FakeFanartApi(fanartBody = null, statusCode = 404)
+        val fakeFanartMovie = FakeFanartMovieApi(
+            fanartBody = """
+                {
+                  "name": "Your Name.",
+                  "hdmovielogo": [
+                    { "id": "81234", "url": "http://assets.fanart.tv/fanart/movies/372058/hdmovielogo/your-name-en.png", "lang": "en", "likes": "25" }
+                  ]
+                }
+            """.trimIndent()
+        )
+
+        val repo = LogoRepository(
+            dao = dao,
+            tmdbLogoProvider = TmdbLogoProvider(
+                tmdbApi = fakeTmdbTv,
+                tmdbMovieApi = fakeTmdbMovie,
+                hasValidCredentials = { true }
+            ),
+            fanartLogoProvider = FanartLogoProvider(
+                fanartApi = fakeFanartTv,
+                fanartMovieApi = fakeFanartMovie,
+                hasValidCredentials = { true }
+            )
+        )
+
+        val movieAnime = Anime(
+            hoshikaId = 21519L,
+            anilistId = 21519L,
+            title = "Kimi no Na wa.",
+            englishTitle = "Your Name.",
+            japaneseTitle = "君の名は。",
+            releaseYear = 2016,
+            format = "MOVIE"
+        )
+
+        val info = repo.getLogoInfoForAnime(movieAnime)
+        assertNotNull(info)
+        assertEquals(372058L, info!!.tmdbId)
+        assertEquals("FANART", info.provider)
+        assertEquals("https://assets.fanart.tv/fanart/movies/372058/hdmovielogo/your-name-en.png", info.logoUrl)
+        assertEquals(1, fakeTmdbMovie.searchCount)
+        assertEquals(1, fakeTmdbMovie.imagesCount)
+        assertEquals(1, fakeFanartMovie.requestCount)
+    }
+
+    // TEST 13: Romaji-only title matches TMDB English/Japanese entry via significant token + animation genre
+    @Test
+    fun test13_romajiOnlyTitle_matchesTmdbEnglishSeriesViaKeywordToken() = runTest {
+        val fakeTmdb = FakeTmdbApi(
+            searchBody = tmdbSearchPayload(
+                id = 209867L,
+                name = "Frieren: Beyond Journey's End",
+                originalName = "葬送のフリーレン",
+                airDate = "2023-09-29"
+            ),
+            imagesBody = """
+                {
+                  "id": 209867,
+                  "logos": [
+                    { "file_path": "/frieren_en.png", "iso_639_1": "en", "width": 1000, "height": 340, "aspect_ratio": 2.94, "vote_average": 5.0 }
+                  ]
+                }
+            """.trimIndent()
+        )
+        val repo = createLogoRepository(fakeTmdb, FakeFanartApi(null))
+        val frierenRomajiOnly = Anime(
+            hoshikaId = 88441L,
+            anilistId = 154587L,
+            title = "Sousou no Frieren",
+            englishTitle = null,
+            japaneseTitle = null,
+            releaseYear = 2023,
+            format = "TV"
+        )
+
+        val info = repo.getLogoInfoForAnime(frierenRomajiOnly)
+        assertNotNull(info)
+        assertEquals(209867L, info!!.tmdbId)
+        assertEquals("https://image.tmdb.org/t/p/original/frieren_en.png", info.logoUrl)
+    }
+
+    // TEST 14: Secret normalization, diagnostic classification, and log redaction
+    @Test
+    fun test14_secretNormalizationDiagnosticsAndLogRedaction() {
+        assertEquals("abc123tokenvalue", NetworkModule.normalizeSecret(" \"abc123tokenvalue\" "))
+        assertNull(NetworkModule.normalizeSecret("\"MY_TMDB_API_KEY\""))
+        assertNull(NetworkModule.normalizeSecret("   "))
+
+        assertEquals(LogoFailureCategory.AUTH_FAILURE, LogoLogger.classifyHttpFailure(401))
+        assertEquals(LogoFailureCategory.AUTH_FAILURE, LogoLogger.classifyHttpFailure(403))
+        assertEquals(LogoFailureCategory.RATE_LIMITED, LogoLogger.classifyHttpFailure(429))
+        assertEquals(LogoFailureCategory.MISSING_ARTWORK, LogoLogger.classifyHttpFailure(404))
+        assertEquals(LogoFailureCategory.NETWORK_ERROR, LogoLogger.classifyHttpFailure(503))
+
+        val sanitized = LogoLogger.sanitize(
+            "https://webservice.fanart.tv/v3.2/tv/1429?api_key=secretkey123&source=tmdb Authorization: Bearer eyJhbGciOi ABC X-Client-Id: client999"
+        )
+        assertFalse(sanitized.contains("secretkey123"))
+        assertFalse(sanitized.contains("eyJhbGciOi"))
+        assertFalse(sanitized.contains("client999"))
+        assertTrue(sanitized.contains("api_key=REDACTED"))
+        assertTrue(sanitized.contains("Authorization: REDACTED"))
+    }
+
     private fun createLogoRepository(tmdbApi: TmdbApi, fanartApi: FanartApi): LogoRepository {
         return LogoRepository(
             dao = dao,
@@ -475,6 +684,71 @@ class ExampleRobolectricTest {
                 )
             }
             return Response.success(fanartBody.toResponseBody("application/json".toMediaType()))
+        }
+    }
+
+    private class FakeTmdbMovieApi(
+        private val searchBody: String?,
+        private val imagesBody: String?
+    ) : TmdbMovieApi {
+        var searchCount = 0
+        var imagesCount = 0
+
+        override suspend fun searchMovie(
+            query: String,
+            primaryReleaseYear: Int?,
+            includeAdult: Boolean
+        ): Response<ResponseBody> {
+            searchCount++
+            val body = searchBody ?: return Response.error(404, "".toResponseBody(null))
+            return Response.success(body.toResponseBody("application/json".toMediaType()))
+        }
+
+        override suspend fun getMovieImages(
+            movieId: Long,
+            includeImageLanguage: String
+        ): Response<ResponseBody> {
+            imagesCount++
+            val body = imagesBody ?: return Response.error(404, "".toResponseBody(null))
+            return Response.success(body.toResponseBody("application/json".toMediaType()))
+        }
+    }
+
+    private class FakeFanartMovieApi(
+        private val fanartBody: String?
+    ) : FanartMovieApi {
+        var requestCount = 0
+
+        override suspend fun getMovieImages(tmdbMovieId: Long): Response<ResponseBody> {
+            requestCount++
+            val body = fanartBody ?: return Response.error(404, "".toResponseBody(null))
+            return Response.success(body.toResponseBody("application/json".toMediaType()))
+        }
+    }
+
+    private class FakeBackendArtworkApi(
+        private val responseJson: String
+    ) : AniScrollApi {
+        var tmdbArtworkRequests = 0
+
+        override suspend fun getZokoAnimeStreams(anilistId: Long, episode: Int, language: String) =
+            Response.error<ResponseBody>(404, "".toResponseBody(null))
+
+        override suspend fun getMegaPlayStreams(anilistId: Long, episode: Int, language: String) =
+            Response.error<ResponseBody>(404, "".toResponseBody(null))
+
+        override suspend fun searchAnimeIds(query: String, limit: Int) =
+            Response.error<ResponseBody>(404, "".toResponseBody(null))
+
+        override suspend fun getAniListIdFromMal(malId: Long) =
+            Response.error<ResponseBody>(404, "".toResponseBody(null))
+
+        override suspend fun getHoshikaProxy(path: String, query: String?, page: Int?, genre: String?, day: String?) =
+            Response.error<ResponseBody>(404, "".toResponseBody(null))
+
+        override suspend fun getTmdbAnimeArtwork(malId: Long?, title: String?): Response<ResponseBody> {
+            tmdbArtworkRequests++
+            return Response.success(responseJson.toResponseBody("application/json".toMediaType()))
         }
     }
 }

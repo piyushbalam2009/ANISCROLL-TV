@@ -227,6 +227,25 @@ interface TmdbApi {
 }
 
 /**
+ * TMDB v3 Movie endpoints for anime theatrical films (`format == MOVIE`).
+ */
+interface TmdbMovieApi {
+
+    @GET("search/movie")
+    suspend fun searchMovie(
+        @Query("query") query: String,
+        @Query("primary_release_year") primaryReleaseYear: Int? = null,
+        @Query("include_adult") includeAdult: Boolean = false
+    ): Response<ResponseBody>
+
+    @GET("movie/{movieId}/images")
+    suspend fun getMovieImages(
+        @Path("movieId") movieId: Long,
+        @Query("include_image_language") includeImageLanguage: String = "en,null,ja"
+    ): Response<ResponseBody>
+}
+
+/**
  * Official Fanart.tv v3.2 API — Fallback provider exclusively for transparent anime title logos (`hdtvlogo`).
  * Base URL: https://webservice.fanart.tv/v3.2/
  * Endpoint: GET https://webservice.fanart.tv/v3.2/tv/{tmdb_tv_id}?api_key={FANART_API_KEY}&source=tmdb
@@ -237,6 +256,17 @@ interface FanartApi {
     suspend fun getTvImages(
         @Path("tmdbTvId") tmdbTvId: Long,
         @Query("source") source: String = "tmdb"
+    ): Response<ResponseBody>
+}
+
+/**
+ * Fanart.tv v3.2 Movie endpoint for anime theatrical films (`format == MOVIE`), supporting `hdmovielogo`.
+ */
+interface FanartMovieApi {
+
+    @GET("movies/{tmdbMovieId}")
+    suspend fun getMovieImages(
+        @Path("tmdbMovieId") tmdbMovieId: Long
     ): Response<ResponseBody>
 }
 

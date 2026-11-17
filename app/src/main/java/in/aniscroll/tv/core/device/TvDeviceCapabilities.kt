@@ -11,9 +11,16 @@ import android.os.Build
 import android.util.DisplayMetrics
 import android.view.Display
 import androidx.media3.common.MimeTypes
+import coil.EventListener
 import coil.ImageLoader
+import coil.decode.SvgDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
+import coil.request.ErrorResult
+import coil.request.ImageRequest
+import `in`.aniscroll.tv.artwork.LogoFailureCategory
+import `in`.aniscroll.tv.artwork.LogoLogger
+import `in`.aniscroll.tv.core.network.NetworkModule
 import `in`.aniscroll.tv.player.StreamingDiagnostics
 import java.io.File
 import java.util.Locale
@@ -399,16 +406,17 @@ object TvDeviceCapabilities {
         } else {
             0.22
         }
-        val bitmapConfig = if (profile.isLowRamDevice) {
-            Bitmap.Config.RGB_565
-        } else {
-            Bitmap.Config.ARGB_8888
-        }
 
         return ImageLoader.Builder(appCtx)
-            .bitmapConfig(bitmapConfig)
-            .allowRgb565(true)
+            .okHttpClient { NetworkModule.imageOkHttpClient }
+            .components {
+                add(SvgDecoder.Factory())
+            }
+            // Keep ARGB_8888 default so transparent PNG artwork never loses alpha; allowRgb565 optimizes opaque posters on low-RAM devices
+            .bitmapConfig(Bitmap.Config.ARGB_8888)
+            .allowRgb565(profile.isLowRamDevice)
             .crossfade(true)
+            .respectCacheHeaders(false)
             .memoryCache {
                 MemoryCache.Builder(appCtx)
                     .maxSizePercent(memPercent)
@@ -420,6 +428,15 @@ object TvDeviceCapabilities {
                     .maxSizeBytes(if (profile.isLowRamDevice) 32L * 1024 * 1024 else 64L * 1024 * 1024)
                     .build()
             }
+            .eventListener(object : EventListener {
+                override fun onError(request: ImageRequest, result: ErrorResult) {
+                    val host = LogoLogger.extractHost(request.data?.toString())
+                    LogoLogger.w(
+                        "Coil global artwork error host=$host category=${LogoFailureCategory.IMAGE_RENDER_FAILURE.name}: ${result.throwable.message}",
+                        result.throwable
+                    )
+                }
+            })
             .build()
     }
 }

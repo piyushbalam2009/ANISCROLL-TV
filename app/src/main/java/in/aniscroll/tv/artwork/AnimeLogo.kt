@@ -1,6 +1,7 @@
 package `in`.aniscroll.tv.artwork
 
 import android.content.Context
+import android.graphics.Bitmap
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
@@ -22,17 +23,24 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import coil.EventListener
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import coil.decode.SvgDecoder
+import coil.disk.DiskCache
+import coil.memory.MemoryCache
 import coil.request.CachePolicy
+import coil.request.ErrorResult
 import coil.request.ImageRequest
 import `in`.aniscroll.tv.core.designsystem.TvColors
+import `in`.aniscroll.tv.core.network.NetworkModule
+import java.io.File
 
 /**
- * Shared Coil ImageLoader configured with [SvgDecoder.Factory] so transparent PNG, SVG, WEBP,
- * and JPG anime title logos from TMDB and Fanart.tv decode reliably on Android TV.
+ * Shared Coil ImageLoader configured with [NetworkModule.imageOkHttpClient], [SvgDecoder.Factory],
+ * [Bitmap.Config.ARGB_8888] alpha preservation, and error diagnostics so transparent PNG, SVG, WEBP,
+ * and JPG anime title logos from TMDB and Fanart.tv decode reliably on all Fire TV / Android TV APKs.
  */
 object LogoImageLoader {
     @Volatile
@@ -45,14 +53,38 @@ object LogoImageLoader {
     }
 
     fun create(context: Context): ImageLoader {
-        return ImageLoader.Builder(context)
+        val appCtx = context.applicationContext
+        return ImageLoader.Builder(appCtx)
+            .okHttpClient { NetworkModule.imageOkHttpClient }
             .components {
                 add(SvgDecoder.Factory())
             }
+            .bitmapConfig(Bitmap.Config.ARGB_8888)
+            .allowRgb565(false)
             .crossfade(true)
             .respectCacheHeaders(false)
             .diskCachePolicy(CachePolicy.ENABLED)
             .memoryCachePolicy(CachePolicy.ENABLED)
+            .memoryCache {
+                MemoryCache.Builder(appCtx)
+                    .maxSizePercent(0.12)
+                    .build()
+            }
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(File(appCtx.cacheDir, "aniscroll_logo_image_cache"))
+                    .maxSizeBytes(32L * 1024 * 1024)
+                    .build()
+            }
+            .eventListener(object : EventListener {
+                override fun onError(request: ImageRequest, result: ErrorResult) {
+                    val host = LogoLogger.extractHost(request.data?.toString())
+                    LogoLogger.w(
+                        "Coil logo decode/fetch error host=$host category=${LogoFailureCategory.IMAGE_RENDER_FAILURE.name}: ${result.throwable.message}",
+                        result.throwable
+                    )
+                }
+            })
             .build()
     }
 }
@@ -79,12 +111,7 @@ fun AnimeLogo(
     onLogoLoadFailed: ((String) -> Unit)? = null
 ) {
     val cleanUrl = remember(logoUrl) {
-        logoUrl?.trim()?.takeIf {
-            it.isNotEmpty() &&
-                !it.equals("null", ignoreCase = true) &&
-                !it.equals("undefined", ignoreCase = true) &&
-                (it.startsWith("https://") || it.startsWith("http://"))
-        }
+        LogoLogger.normalizeSecureArtworkUrl(logoUrl)
     }
 
     var loadSucceededForCurrentUrl by remember(hoshikaId, cleanUrl) { mutableStateOf(false) }

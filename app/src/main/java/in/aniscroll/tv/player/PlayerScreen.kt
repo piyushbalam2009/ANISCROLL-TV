@@ -39,8 +39,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.testTag
@@ -59,6 +57,8 @@ import androidx.media3.ui.PlayerView
 import `in`.aniscroll.tv.core.designsystem.TvColors
 import `in`.aniscroll.tv.core.designsystem.TvErrorBanner
 import `in`.aniscroll.tv.core.designsystem.TvFocusableButton
+import `in`.aniscroll.tv.core.designsystem.rememberSafeFocusRequester
+import `in`.aniscroll.tv.core.designsystem.safeFocusRequester
 import `in`.aniscroll.tv.domain.model.SubtitlePreferences
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -85,9 +85,9 @@ fun PlayerScreen(
     var lastFocusTarget by remember { mutableStateOf(PlayerFocusTarget.PLAY_PAUSE) }
     var isSeeking by remember { mutableStateOf(false) }
 
-    val surfaceFocusRequester = remember { FocusRequester() }
-    val playPauseFocusRequester = remember { FocusRequester() }
-    val skipButtonFocusRequester = remember { FocusRequester() }
+    val surfaceFocusRequester = rememberSafeFocusRequester()
+    val playPauseFocusRequester = rememberSafeFocusRequester()
+    val skipButtonFocusRequester = rememberSafeFocusRequester()
 
     val exoPlayer = remember(hoshikaId, episodeNumber, state.surfaceRecoveryEpoch) {
         controller.exoPlayerManager.getOrCreatePlayer()
@@ -131,14 +131,14 @@ fun PlayerScreen(
             if (lastFocusTarget == PlayerFocusTarget.SKIP_PROMPT) {
                 lastFocusTarget = PlayerFocusTarget.PLAY_PAUSE
                 if (controlsVisible && activeSettingsPanel == PlayerSettingsPanel.NONE) {
-                    runCatching { playPauseFocusRequester.requestFocus() }
+                    playPauseFocusRequester.requestFocusSafely()
                 }
             }
             if (!controlsVisible) {
-                runCatching { surfaceFocusRequester.requestFocus() }
+                surfaceFocusRequester.requestFocusSafely()
             }
         } else if (!controlsVisible && activeSettingsPanel == PlayerSettingsPanel.NONE && state.errorMessage == null) {
-            runCatching { skipButtonFocusRequester.requestFocus() }
+            skipButtonFocusRequester.requestFocusSafely()
         }
     }
 
@@ -177,7 +177,7 @@ fun PlayerScreen(
         modifier = modifier
             .fillMaxSize()
             .background(TvColors.MainBackground)
-            .focusRequester(surfaceFocusRequester)
+            .safeFocusRequester(surfaceFocusRequester)
             .onPreviewKeyEvent { event ->
                 if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN) {
                     lastUserInteractionMs = System.currentTimeMillis()
@@ -243,7 +243,7 @@ fun PlayerScreen(
                             return@onPreviewKeyEvent false
                         }
                         if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && state.activeSkipPrompt != null) {
-                            runCatching { skipButtonFocusRequester.requestFocus() }
+                            skipButtonFocusRequester.requestFocusSafely()
                             return@onPreviewKeyEvent true
                         }
                         if (lastFocusTarget == PlayerFocusTarget.SKIP_PROMPT) {
@@ -392,8 +392,8 @@ fun PlayerScreen(
                 canInteract = controlsVisible && state.errorMessage == null,
                 lastFocusTarget = lastFocusTarget,
                 isMovie = `in`.aniscroll.tv.data.repository.StreamingSourceResolver.isMovie(state.anime?.format),
-                playPauseFocusRequester = playPauseFocusRequester,
-                skipButtonFocusRequester = if (isSkipPromptVisible) skipButtonFocusRequester else null,
+                playPauseSafeFocusRequester = playPauseFocusRequester,
+                skipButtonSafeFocusRequester = if (isSkipPromptVisible) skipButtonFocusRequester else null,
                 onSeekingChanged = { seeking ->
                     isSeeking = seeking
                     if (seeking) recordActivity()
@@ -437,16 +437,19 @@ fun PlayerScreen(
                 .padding(end = 32.dp, bottom = if (controlsVisible) 104.dp else 36.dp)
         ) {
             state.activeSkipPrompt?.let { prompt ->
-                LaunchedEffect(prompt.type, controlsVisible) {
-                    if (!controlsVisible && activeSettingsPanel == PlayerSettingsPanel.NONE) {
-                        runCatching { skipButtonFocusRequester.requestFocus() }
+                LaunchedEffect(prompt.type, controlsVisible, skipButtonFocusRequester.isAttached) {
+                    if (!controlsVisible &&
+                        activeSettingsPanel == PlayerSettingsPanel.NONE &&
+                        skipButtonFocusRequester.isAttached
+                    ) {
+                        skipButtonFocusRequester.requestFocusSafely()
                     }
                 }
                 SkipIntroOutroButton(
                     prompt = prompt,
                     enabled = isSkipPromptVisible,
-                    focusRequester = skipButtonFocusRequester,
-                    controlsFocusRequester = if (controlsVisible) playPauseFocusRequester else null,
+                    safeFocusRequester = skipButtonFocusRequester,
+                    controlsSafeFocusRequester = if (controlsVisible) playPauseFocusRequester else null,
                     onNavigateToControls = if (!controlsVisible) {
                         {
                             lastFocusTarget = PlayerFocusTarget.PLAY_PAUSE

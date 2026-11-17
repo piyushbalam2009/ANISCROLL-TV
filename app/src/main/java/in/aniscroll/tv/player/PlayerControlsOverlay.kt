@@ -73,6 +73,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import `in`.aniscroll.tv.core.designsystem.SafeFocusRequester
+import `in`.aniscroll.tv.core.designsystem.rememberSafeFocusRequester
+import `in`.aniscroll.tv.core.designsystem.safeFocusRequester
+import `in`.aniscroll.tv.core.designsystem.trackFocusAttachment
 import `in`.aniscroll.tv.domain.model.SubtitleBackground
 import `in`.aniscroll.tv.domain.model.SubtitleColor
 import `in`.aniscroll.tv.domain.model.SubtitlePosition
@@ -150,17 +154,20 @@ fun PlayerControlsOverlay(
     isMovie: Boolean = false,
     onSeekingChanged: (Boolean) -> Unit = {},
     playPauseFocusRequester: FocusRequester? = null,
-    skipButtonFocusRequester: FocusRequester? = null
+    skipButtonFocusRequester: FocusRequester? = null,
+    playPauseSafeFocusRequester: SafeFocusRequester? = null,
+    skipButtonSafeFocusRequester: SafeFocusRequester? = null
 ) {
-    val backFocus = remember { FocusRequester() }
-    val rewindFocus = remember { FocusRequester() }
-    val playPauseFocus = playPauseFocusRequester ?: remember { FocusRequester() }
-    val forwardFocus = remember { FocusRequester() }
-    val timelineFocus = remember { FocusRequester() }
-    val prevFocus = remember { FocusRequester() }
-    val nextFocus = remember { FocusRequester() }
-    val subtitlesFocus = remember { FocusRequester() }
-    val audioFocus = remember { FocusRequester() }
+    val backFocus = rememberSafeFocusRequester()
+    val rewindFocus = rememberSafeFocusRequester()
+    val playPauseFocus = playPauseSafeFocusRequester ?: rememberSafeFocusRequester(playPauseFocusRequester)
+    val forwardFocus = rememberSafeFocusRequester()
+    val timelineFocus = rememberSafeFocusRequester()
+    val prevFocus = rememberSafeFocusRequester()
+    val nextFocus = rememberSafeFocusRequester()
+    val subtitlesFocus = rememberSafeFocusRequester()
+    val audioFocus = rememberSafeFocusRequester()
+    val skipSafeFocus = skipButtonSafeFocusRequester
 
     val showPrevEpisode = hasPreviousEpisode && !isMovie
     val showNextEpisode = hasNextEpisode && !isMovie
@@ -168,21 +175,35 @@ fun PlayerControlsOverlay(
 
     LaunchedEffect(canInteract, activePanel) {
         if (canInteract && activePanel == PlayerSettingsPanel.NONE) {
-            val targetRequester = when (lastFocusTarget) {
-                PlayerFocusTarget.BACK -> backFocus
-                PlayerFocusTarget.SEEK_BACK -> rewindFocus
-                PlayerFocusTarget.PLAY_PAUSE -> playPauseFocus
-                PlayerFocusTarget.SEEK_FORWARD -> forwardFocus
-                PlayerFocusTarget.TIMELINE -> timelineFocus
-                PlayerFocusTarget.PREV_EPISODE -> if (showPrevEpisode) prevFocus else playPauseFocus
-                PlayerFocusTarget.NEXT_EPISODE -> if (showNextEpisode) nextFocus else playPauseFocus
-                PlayerFocusTarget.SUBTITLES -> subtitlesFocus
-                PlayerFocusTarget.AUDIO -> audioFocus
+            when (lastFocusTarget) {
+                PlayerFocusTarget.BACK -> backFocus.requestFocusSafely()
+                PlayerFocusTarget.SEEK_BACK -> rewindFocus.requestFocusSafely()
+                PlayerFocusTarget.PLAY_PAUSE -> playPauseFocus.requestFocusSafely()
+                PlayerFocusTarget.SEEK_FORWARD -> forwardFocus.requestFocusSafely()
+                PlayerFocusTarget.TIMELINE -> timelineFocus.requestFocusSafely()
+                PlayerFocusTarget.PREV_EPISODE -> {
+                    if (showPrevEpisode && prevFocus.isAttached) prevFocus.requestFocusSafely()
+                    else playPauseFocus.requestFocusSafely()
+                }
+                PlayerFocusTarget.NEXT_EPISODE -> {
+                    if (showNextEpisode && nextFocus.isAttached) nextFocus.requestFocusSafely()
+                    else playPauseFocus.requestFocusSafely()
+                }
+                PlayerFocusTarget.SUBTITLES -> subtitlesFocus.requestFocusSafely()
+                PlayerFocusTarget.AUDIO -> audioFocus.requestFocusSafely()
                 PlayerFocusTarget.SPEED,
-                PlayerFocusTarget.QUALITY -> subtitlesFocus
-                PlayerFocusTarget.SKIP_PROMPT -> skipButtonFocusRequester ?: playPauseFocus
+                PlayerFocusTarget.QUALITY -> subtitlesFocus.requestFocusSafely()
+                PlayerFocusTarget.SKIP_PROMPT -> {
+                    if (skipSafeFocus?.isAttached == true) {
+                        skipSafeFocus.requestFocusSafely()
+                    } else if (skipButtonFocusRequester != null) {
+                        runCatching { skipButtonFocusRequester.requestFocus() }
+                            .onFailure { playPauseFocus.requestFocusSafely() }
+                    } else {
+                        playPauseFocus.requestFocusSafely()
+                    }
+                }
             }
-            runCatching { targetRequester.requestFocus() }
         }
     }
 
@@ -214,11 +235,12 @@ fun PlayerControlsOverlay(
                 enabled = noPanelOpen,
                 size = 44.dp,
                 iconSize = 22.dp,
-                focusRequester = backFocus,
+                focusRequester = backFocus.focusRequester,
                 modifier = Modifier
+                    .trackFocusAttachment(backFocus)
                     .focusProperties {
                         canFocus = noPanelOpen
-                        down = playPauseFocus
+                        down = playPauseFocus.orDefault()
                     }
                     .onFocusChanged {
                         if (it.isFocused) {
@@ -274,13 +296,14 @@ fun PlayerControlsOverlay(
                 enabled = noPanelOpen,
                 size = 52.dp,
                 iconSize = 26.dp,
-                focusRequester = rewindFocus,
+                focusRequester = rewindFocus.focusRequester,
                 modifier = Modifier
+                    .trackFocusAttachment(rewindFocus)
                     .focusProperties {
                         canFocus = noPanelOpen
-                        up = backFocus
-                        down = timelineFocus
-                        right = playPauseFocus
+                        up = backFocus.orDefault()
+                        down = timelineFocus.orDefault()
+                        right = playPauseFocus.orDefault()
                     }
                     .onFocusChanged {
                         if (it.isFocused) {
@@ -301,14 +324,15 @@ fun PlayerControlsOverlay(
                 enabled = noPanelOpen,
                 size = 64.dp,
                 iconSize = 34.dp,
-                focusRequester = playPauseFocus,
+                focusRequester = playPauseFocus.focusRequester,
                 modifier = Modifier
+                    .trackFocusAttachment(playPauseFocus)
                     .focusProperties {
                         canFocus = noPanelOpen
-                        up = backFocus
-                        down = timelineFocus
-                        left = rewindFocus
-                        right = forwardFocus
+                        up = backFocus.orDefault()
+                        down = timelineFocus.orDefault()
+                        left = rewindFocus.orDefault()
+                        right = forwardFocus.orDefault()
                     }
                     .onFocusChanged {
                         if (it.isFocused) {
@@ -329,16 +353,19 @@ fun PlayerControlsOverlay(
                 enabled = noPanelOpen,
                 size = 52.dp,
                 iconSize = 26.dp,
-                focusRequester = forwardFocus,
+                focusRequester = forwardFocus.focusRequester,
                 modifier = Modifier
+                    .trackFocusAttachment(forwardFocus)
                     .focusProperties {
                         canFocus = noPanelOpen
-                        up = backFocus
-                        down = skipButtonFocusRequester ?: timelineFocus
-                        left = playPauseFocus
-                        if (skipButtonFocusRequester != null) {
-                            right = skipButtonFocusRequester
+                        up = backFocus.orDefault()
+                        down = if (skipSafeFocus?.isAttached == true) {
+                            skipSafeFocus.focusRequester
+                        } else {
+                            timelineFocus.orDefault()
                         }
+                        left = playPauseFocus.orDefault()
+                        right = skipSafeFocus?.orDefault() ?: FocusRequester.Default
                     }
                     .onFocusChanged {
                         if (it.isFocused) {
@@ -355,10 +382,12 @@ fun PlayerControlsOverlay(
         }
 
         // 3. Bottom Controls: Slim Progress Bar + Minimal Circular Bottom Row
-        val firstBottomFocus = when {
-            showPrevEpisode -> prevFocus
-            showNextEpisode -> nextFocus
-            else -> subtitlesFocus
+        val resolveFirstBottomFocus: () -> FocusRequester = {
+            when {
+                showPrevEpisode && prevFocus.isAttached -> prevFocus.focusRequester
+                showNextEpisode && nextFocus.isAttached -> nextFocus.focusRequester
+                else -> subtitlesFocus.orDefault()
+            }
         }
 
         Column(
@@ -372,8 +401,14 @@ fun PlayerControlsOverlay(
                 progressStateFlow = progressStateFlow,
                 enabled = noPanelOpen,
                 focusRequester = timelineFocus,
-                upFocusRequester = skipButtonFocusRequester ?: playPauseFocus,
-                downFocusRequester = firstBottomFocus,
+                upFocusProvider = {
+                    if (skipSafeFocus?.isAttached == true) {
+                        skipSafeFocus.focusRequester
+                    } else {
+                        playPauseFocus.orDefault()
+                    }
+                },
+                downFocusProvider = resolveFirstBottomFocus,
                 onSeekRelative = { delta ->
                     onUserActivity()
                     onSeekRelative(delta)
@@ -406,12 +441,17 @@ fun PlayerControlsOverlay(
                             enabled = noPanelOpen,
                             size = 44.dp,
                             iconSize = 22.dp,
-                            focusRequester = prevFocus,
+                            focusRequester = prevFocus.focusRequester,
                             modifier = Modifier
+                                .trackFocusAttachment(prevFocus)
                                 .focusProperties {
                                     canFocus = noPanelOpen
-                                    up = timelineFocus
-                                    right = if (showNextEpisode) nextFocus else subtitlesFocus
+                                    up = timelineFocus.orDefault()
+                                    right = if (showNextEpisode && nextFocus.isAttached) {
+                                        nextFocus.focusRequester
+                                    } else {
+                                        subtitlesFocus.orDefault()
+                                    }
                                 }
                                 .onFocusChanged {
                                     if (it.isFocused) {
@@ -434,13 +474,18 @@ fun PlayerControlsOverlay(
                             enabled = noPanelOpen,
                             size = 44.dp,
                             iconSize = 22.dp,
-                            focusRequester = nextFocus,
+                            focusRequester = nextFocus.focusRequester,
                             modifier = Modifier
+                                .trackFocusAttachment(nextFocus)
                                 .focusProperties {
                                     canFocus = noPanelOpen
-                                    up = timelineFocus
-                                    left = if (showPrevEpisode) prevFocus else FocusRequester.Default
-                                    right = subtitlesFocus
+                                    up = timelineFocus.orDefault()
+                                    left = if (showPrevEpisode && prevFocus.isAttached) {
+                                        prevFocus.focusRequester
+                                    } else {
+                                        FocusRequester.Default
+                                    }
+                                    right = subtitlesFocus.orDefault()
                                 }
                                 .onFocusChanged {
                                     if (it.isFocused) {
@@ -468,17 +513,22 @@ fun PlayerControlsOverlay(
                         enabled = noPanelOpen,
                         size = 44.dp,
                         iconSize = 22.dp,
-                        focusRequester = subtitlesFocus,
+                        focusRequester = subtitlesFocus.focusRequester,
                         modifier = Modifier
+                            .trackFocusAttachment(subtitlesFocus)
                             .focusProperties {
                                 canFocus = noPanelOpen
-                                up = skipButtonFocusRequester ?: timelineFocus
+                                up = if (skipSafeFocus?.isAttached == true) {
+                                    skipSafeFocus.focusRequester
+                                } else {
+                                    timelineFocus.orDefault()
+                                }
                                 left = when {
-                                    showNextEpisode -> nextFocus
-                                    showPrevEpisode -> prevFocus
+                                    showNextEpisode && nextFocus.isAttached -> nextFocus.focusRequester
+                                    showPrevEpisode && prevFocus.isAttached -> prevFocus.focusRequester
                                     else -> FocusRequester.Default
                                 }
-                                right = audioFocus
+                                right = audioFocus.orDefault()
                             }
                             .onFocusChanged {
                                 if (it.isFocused) {
@@ -499,15 +549,18 @@ fun PlayerControlsOverlay(
                         enabled = noPanelOpen,
                         size = 44.dp,
                         iconSize = 22.dp,
-                        focusRequester = audioFocus,
+                        focusRequester = audioFocus.focusRequester,
                         modifier = Modifier
+                            .trackFocusAttachment(audioFocus)
                             .focusProperties {
                                 canFocus = noPanelOpen
-                                up = skipButtonFocusRequester ?: timelineFocus
-                                left = subtitlesFocus
-                                if (skipButtonFocusRequester != null) {
-                                    right = skipButtonFocusRequester
+                                up = if (skipSafeFocus?.isAttached == true) {
+                                    skipSafeFocus.focusRequester
+                                } else {
+                                    timelineFocus.orDefault()
                                 }
+                                left = subtitlesFocus.orDefault()
+                                right = skipSafeFocus?.orDefault() ?: FocusRequester.Default
                             }
                             .onFocusChanged {
                                 if (it.isFocused) {
@@ -618,9 +671,9 @@ fun PlayerControlButton(
 fun PlayerProgressBar(
     progressStateFlow: StateFlow<PlaybackProgressState>,
     enabled: Boolean,
-    focusRequester: FocusRequester,
-    upFocusRequester: FocusRequester,
-    downFocusRequester: FocusRequester,
+    focusRequester: SafeFocusRequester,
+    upFocusProvider: () -> FocusRequester,
+    downFocusProvider: () -> FocusRequester,
     onSeekRelative: (Long) -> Unit,
     onTogglePlayPause: () -> Unit,
     onSeekingChanged: (Boolean) -> Unit = {},
@@ -689,11 +742,11 @@ fun PlayerProgressBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .focusRequester(focusRequester)
+                .safeFocusRequester(focusRequester)
                 .focusProperties {
                     canFocus = enabled
-                    up = upFocusRequester
-                    down = downFocusRequester
+                    up = upFocusProvider()
+                    down = downFocusProvider()
                 }
                 .onKeyEvent { event ->
                     if (!enabled || event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
@@ -816,6 +869,8 @@ fun SkipIntroOutroButton(
     enabled: Boolean = true,
     focusRequester: FocusRequester? = null,
     controlsFocusRequester: FocusRequester? = null,
+    safeFocusRequester: SafeFocusRequester? = null,
+    controlsSafeFocusRequester: SafeFocusRequester? = null,
     onNavigateToControls: (() -> Unit)? = null,
     onFocused: (() -> Unit)? = null
 ) {
@@ -852,18 +907,21 @@ fun SkipIntroOutroButton(
         ActiveSkipType.INTRO -> "Skip Intro"
         ActiveSkipType.OUTRO -> "Skip Outro"
     }
-    val focusModifier = if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier
+    val focusModifier = when {
+        safeFocusRequester != null -> Modifier.safeFocusRequester(safeFocusRequester)
+        focusRequester != null -> Modifier.focusRequester(focusRequester)
+        else -> Modifier
+    }
 
     Row(
         modifier = modifier
             .then(focusModifier)
             .focusProperties {
                 canFocus = enabled
-                if (controlsFocusRequester != null) {
-                    left = controlsFocusRequester
-                    up = controlsFocusRequester
-                    down = controlsFocusRequester
-                }
+                val targetControls = controlsSafeFocusRequester?.orDefault() ?: FocusRequester.Default
+                left = targetControls
+                up = targetControls
+                down = targetControls
             }
             .minimumInteractiveComponentSize()
             .graphicsLayer {

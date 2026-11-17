@@ -3,19 +3,23 @@ package `in`.aniscroll.tv.artwork
 import `in`.aniscroll.tv.core.network.NetworkModule
 import `in`.aniscroll.tv.data.remote.AniScrollApi
 import `in`.aniscroll.tv.data.remote.FanartApi
+import `in`.aniscroll.tv.data.remote.FanartMovieApi
 import `in`.aniscroll.tv.domain.model.LogoInfo
 import org.json.JSONObject
+import java.io.IOException
 import java.util.Locale
 
 /**
- * Fanart.tv Title Logo Fallback Provider (Section 4).
+ * Fanart.tv Title Logo Fallback Provider.
  * Only called when TMDB cannot provide a valid title logo.
- * Endpoint: GET https://webservice.fanart.tv/v3.2/tv/{tmdb_tv_id}?api_key={FANART_API_KEY}&source=tmdb
- * Strictly parses the `hdtvlogo` array with language priority: 1. English, 2. Japanese, 3. Language-neutral, 4. Other.
+ * Endpoint (TV): GET https://webservice.fanart.tv/v3.2/tv/{tmdb_tv_id}?api_key={FANART_API_KEY}&source=tmdb
+ * Endpoint (Movie): GET https://webservice.fanart.tv/v3.2/movies/{tmdb_movie_id}?api_key={FANART_API_KEY}
+ * Parses `hdtvlogo` (or `hdmovielogo` for movies) with language priority: 1. English, 2. Japanese, 3. Neutral, 4. Other.
  */
 class FanartLogoProvider(
     private val fanartApi: FanartApi,
     private val aniScrollApi: AniScrollApi? = null,
+    private val fanartMovieApi: FanartMovieApi? = null,
     private val hasValidCredentials: () -> Boolean = { NetworkModule.hasValidFanartCredentials() }
 ) {
 
@@ -24,81 +28,101 @@ class FanartLogoProvider(
         tmdbTvId: Long,
         excludedUrl: String? = null,
         excludedUrls: Set<String> = emptySet(),
-        anilistId: Long? = null
+        anilistId: Long? = null,
+        isMovie: Boolean = false
     ): LogoInfo? {
         if (tmdbTvId <= 0L) {
-            LogoLogger.w(
-                "HoshikaID=$hoshikaId AniListID=$anilistId -> Fanart fallback skipped: invalid tmdbTvId=$tmdbTvId"
+            LogoLogger.logDiagnostic(
+                category = LogoFailureCategory.MISSING_ARTWORK,
+                provider = "FANART",
+                hoshikaId = hoshikaId,
+                anilistId = anilistId,
+                detail = "Fanart fallback skipped: invalid tmdbId=$tmdbTvId"
             )
             return null
         }
 
         if (!hasValidCredentials()) {
-            LogoLogger.w(
-                "HoshikaID=$hoshikaId AniListID=$anilistId tmdbTvId=$tmdbTvId -> Fanart fallback skipped: FANART_API_KEY is missing or placeholder"
+            LogoLogger.logDiagnostic(
+                category = LogoFailureCategory.MISSING_CREDENTIALS,
+                provider = "FANART",
+                hoshikaId = hoshikaId,
+                anilistId = anilistId,
+                detail = "Fanart fallback skipped for tmdbId=$tmdbTvId: FANART_API_KEY missing or placeholder"
             )
             return null
         }
 
         val allExcluded = if (excludedUrl.isNullOrBlank()) excludedUrls else excludedUrls + excludedUrl
         LogoLogger.d(
-            "HoshikaID=$hoshikaId AniListID=$anilistId attempting Fanart.tv fallback for tmdbTvId=$tmdbTvId (source=tmdb)"
+            "HoshikaID=$hoshikaId AniListID=$anilistId attempting Fanart.tv fallback for tmdbId=$tmdbTvId (isMovie=$isMovie)"
         )
-        val rawJson = executeFanartRequest(hoshikaId, tmdbTvId, anilistId) ?: return null
+        val rawJson = executeFanartRequest(hoshikaId, tmdbTvId, anilistId, isMovie) ?: return null
 
         return parseAndSelectBestFanartLogo(
             rawJson = rawJson,
             hoshikaId = hoshikaId,
             tmdbTvId = tmdbTvId,
             excludedUrls = allExcluded,
-            anilistId = anilistId
+            anilistId = anilistId,
+            isMovie = isMovie
         )
     }
 
     private suspend fun executeFanartRequest(
         hoshikaId: Long,
-        tmdbTvId: Long,
-        anilistId: Long?
+        tmdbId: Long,
+        anilistId: Long?,
+        isMovie: Boolean
     ): String? {
         try {
-            val response = fanartApi.getTvImages(tmdbTvId = tmdbTvId, source = "tmdb")
+            val response = if (isMovie && fanartMovieApi != null) {
+                fanartMovieApi.getMovieImages(tmdbMovieId = tmdbId)
+            } else {
+                fanartApi.getTvImages(tmdbTvId = tmdbId, source = "tmdb")
+            }
             val code = response.code()
             LogoLogger.d(
-                "HoshikaID=$hoshikaId AniListID=$anilistId tmdbTvId=$tmdbTvId -> Fanart HTTP status=$code"
+                "HoshikaID=$hoshikaId AniListID=$anilistId tmdbId=$tmdbId -> Fanart HTTP status=$code"
             )
-            when (code) {
-                200 -> {
-                    val body = response.body()?.string()?.trim()
-                    if (!body.isNullOrBlank() && body.startsWith("{")) {
-                        return body
-                    }
-                    LogoLogger.w(
-                        "HoshikaID=$hoshikaId AniListID=$anilistId tmdbTvId=$tmdbTvId -> Fallback reason: Fanart returned empty/non-JSON body"
-                    )
+            if (code == 200) {
+                val body = response.body()?.string()?.trim()
+                if (!body.isNullOrBlank() && body.startsWith("{")) {
+                    return body
                 }
-                401 -> LogoLogger.w(
-                    "HoshikaID=$hoshikaId AniListID=$anilistId -> Fallback reason: Fanart returned 401 Unauthorized"
+                LogoLogger.logDiagnostic(
+                    category = LogoFailureCategory.INVALID_RESPONSE,
+                    provider = "FANART",
+                    hoshikaId = hoshikaId,
+                    anilistId = anilistId,
+                    detail = "Fanart returned empty/non-JSON body for tmdbId=$tmdbId"
                 )
-                403 -> LogoLogger.w(
-                    "HoshikaID=$hoshikaId AniListID=$anilistId -> Fallback reason: Fanart returned 403 Forbidden"
-                )
-                404 -> LogoLogger.d(
-                    "HoshikaID=$hoshikaId AniListID=$anilistId -> Fallback reason: Fanart returned 404 Not Found for tmdbTvId=$tmdbTvId"
-                )
-                429 -> LogoLogger.w(
-                    "HoshikaID=$hoshikaId AniListID=$anilistId -> Fallback reason: Fanart returned 429 Too Many Requests"
-                )
-                in 500..599 -> LogoLogger.w(
-                    "HoshikaID=$hoshikaId AniListID=$anilistId -> Fallback reason: Fanart returned server error $code"
-                )
-                else -> LogoLogger.w(
-                    "HoshikaID=$hoshikaId AniListID=$anilistId -> Fallback reason: Fanart returned HTTP $code"
+            } else {
+                LogoLogger.logDiagnostic(
+                    category = LogoLogger.classifyHttpFailure(code),
+                    provider = "FANART",
+                    hoshikaId = hoshikaId,
+                    anilistId = anilistId,
+                    detail = "Fanart returned HTTP $code for tmdbId=$tmdbId"
                 )
             }
+        } catch (e: IOException) {
+            LogoLogger.logDiagnostic(
+                category = LogoFailureCategory.NETWORK_ERROR,
+                provider = "FANART",
+                hoshikaId = hoshikaId,
+                anilistId = anilistId,
+                detail = "Fanart network failure for tmdbId=$tmdbId: ${e.message}",
+                throwable = e
+            )
         } catch (e: Exception) {
-            LogoLogger.w(
-                "HoshikaID=$hoshikaId AniListID=$anilistId -> Fallback reason: Fanart request exception for tmdbTvId=$tmdbTvId (${e.message})",
-                e
+            LogoLogger.logDiagnostic(
+                category = LogoFailureCategory.INVALID_RESPONSE,
+                provider = "FANART",
+                hoshikaId = hoshikaId,
+                anilistId = anilistId,
+                detail = "Fanart unexpected failure for tmdbId=$tmdbId: ${e.message}",
+                throwable = e
             )
         }
         return null
@@ -110,19 +134,31 @@ class FanartLogoProvider(
         tmdbTvId: Long,
         excludedUrl: String? = null,
         excludedUrls: Set<String> = emptySet(),
-        anilistId: Long? = null
+        anilistId: Long? = null,
+        isMovie: Boolean = false
     ): LogoInfo? {
         val allExcluded = if (excludedUrl.isNullOrBlank()) excludedUrls else excludedUrls + excludedUrl
         return try {
             val root = JSONObject(rawJson.trim())
-            val logoArray = root.optJSONArray("hdtvlogo")
+            val logoArray = if (isMovie) {
+                root.optJSONArray("hdmovielogo")
+                    ?: root.optJSONArray("movielogo")
+                    ?: root.optJSONArray("hdtvlogo")
+            } else {
+                root.optJSONArray("hdtvlogo")
+                    ?: root.optJSONArray("clearlogo")
+            }
             val totalLogos = logoArray?.length() ?: 0
             LogoLogger.d(
-                "HoshikaID=$hoshikaId AniListID=$anilistId tmdbTvId=$tmdbTvId -> Number of Fanart hdtvlogo items=$totalLogos"
+                "HoshikaID=$hoshikaId AniListID=$anilistId tmdbId=$tmdbTvId -> Number of Fanart logo items=$totalLogos"
             )
             if (logoArray == null || totalLogos == 0) {
-                LogoLogger.i(
-                    "HoshikaID=$hoshikaId AniListID=$anilistId tmdbTvId=$tmdbTvId -> Fallback reason: Fanart hdtvlogo array is empty"
+                LogoLogger.logDiagnostic(
+                    category = LogoFailureCategory.MISSING_ARTWORK,
+                    provider = "FANART",
+                    hoshikaId = hoshikaId,
+                    anilistId = anilistId,
+                    detail = "Fanart returned 0 logos for tmdbId=$tmdbTvId"
                 )
                 return null
             }
@@ -140,11 +176,10 @@ class FanartLogoProvider(
             val candidates = mutableListOf<FanartCandidate>()
             for (i in 0 until totalLogos) {
                 val obj = logoArray.optJSONObject(i) ?: continue
-                val url = obj.optString("url", "").trim().takeIf {
-                    it.isNotEmpty() &&
-                        !it.equals("null", ignoreCase = true) &&
-                        (it.startsWith("https://") || it.startsWith("http://"))
-                } ?: continue
+                // Always normalize http://assets.fanart.tv/... -> https://assets.fanart.tv/...
+                // so Android 9+ release APKs never reject Fanart images due to cleartext HTTP.
+                val url = LogoLogger.normalizeSecureArtworkUrl(obj.optString("url", ""))
+                    ?: continue
 
                 if (url in allExcluded) continue
 
@@ -176,8 +211,12 @@ class FanartLogoProvider(
             }
 
             if (candidates.isEmpty()) {
-                LogoLogger.w(
-                    "HoshikaID=$hoshikaId AniListID=$anilistId tmdbTvId=$tmdbTvId -> Fallback reason: 0 valid Fanart hdtvlogo candidates after filtering"
+                LogoLogger.logDiagnostic(
+                    category = LogoFailureCategory.MISSING_ARTWORK,
+                    provider = "FANART",
+                    hoshikaId = hoshikaId,
+                    anilistId = anilistId,
+                    detail = "0 valid Fanart logo candidates after filtering for tmdbId=$tmdbTvId"
                 )
                 return null
             }
@@ -197,7 +236,7 @@ class FanartLogoProvider(
             ).first()
 
             LogoLogger.i(
-                "HoshikaID=$hoshikaId AniListID=$anilistId tmdbTvId=$tmdbTvId -> Selected FANART hdtvlogo lang='${best.lang ?: "neutral"}' format=${best.format} (${best.width}x${best.height}, likes=${best.likes}) host=${LogoLogger.extractHost(best.url)}"
+                "HoshikaID=$hoshikaId AniListID=$anilistId tmdbId=$tmdbTvId -> Selected provider=FANART lang='${best.lang ?: "neutral"}' format=${best.format} (${best.width}x${best.height}, likes=${best.likes}) host=${LogoLogger.extractHost(best.url)}"
             )
 
             LogoInfo(
@@ -212,9 +251,13 @@ class FanartLogoProvider(
                 isValid = true
             )
         } catch (e: Exception) {
-            LogoLogger.e(
-                "Failed parsing Fanart hdtvlogo for HoshikaID=$hoshikaId AniListID=$anilistId tmdbTvId=$tmdbTvId: ${e.message}",
-                e
+            LogoLogger.logDiagnostic(
+                category = LogoFailureCategory.INVALID_RESPONSE,
+                provider = "FANART",
+                hoshikaId = hoshikaId,
+                anilistId = anilistId,
+                detail = "Failed parsing Fanart response for tmdbId=$tmdbTvId: ${e.message}",
+                throwable = e
             )
             null
         }
@@ -231,3 +274,4 @@ class FanartLogoProvider(
         }
     }
 }
+

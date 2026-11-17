@@ -1,11 +1,14 @@
 package `in`.aniscroll.tv.core.network
 
 import com.example.BuildConfig
+import `in`.aniscroll.tv.artwork.LogoLogger
 import `in`.aniscroll.tv.data.remote.AniScrollApi
 import `in`.aniscroll.tv.data.remote.AniSkipApi
 import `in`.aniscroll.tv.data.remote.FanartApi
+import `in`.aniscroll.tv.data.remote.FanartMovieApi
 import `in`.aniscroll.tv.data.remote.HoshikaApi
 import `in`.aniscroll.tv.data.remote.TmdbApi
+import `in`.aniscroll.tv.data.remote.TmdbMovieApi
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.Interceptor
@@ -62,9 +65,8 @@ object NetworkModule {
         "Mozilla/5.0 (Linux; Android 14; Android TV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 AniScrollTV/1.0"
 
     /**
-     * Shared HTTP connection pool and dispatcher reused across Retrofit API calls AND ExoPlayer
-     * HLS manifest/segment transfers so TLS/HTTP2 sockets to https://anivault-scraper-five.vercel.app
-     * stay warm and concurrent segment loads never bottleneck behind a 5-per-host limit.
+     * Shared HTTP connection pool and dispatcher reused across Retrofit API calls, Coil image requests,
+     * and ExoPlayer HLS transfers so TLS/HTTP2 sockets stay warm cleanly across hosts.
      */
     private val sharedConnectionPool: ConnectionPool by lazy {
         ConnectionPool(maxIdleConnections = 20, keepAliveDuration = 5, TimeUnit.MINUTES)
@@ -77,13 +79,20 @@ object NetworkModule {
         }
     }
 
+    fun normalizeSecret(value: String?): String? {
+        val cleaned = value?.trim()?.trim('"', '\'')?.trim() ?: return null
+        return cleaned.takeIf {
+            it.isNotEmpty() &&
+                !it.startsWith("MY_", ignoreCase = true) &&
+                !it.startsWith("YOUR_", ignoreCase = true) &&
+                !it.equals("null", ignoreCase = true) &&
+                !it.equals("undefined", ignoreCase = true) &&
+                !it.equals("PLACEHOLDER", ignoreCase = true)
+        }
+    }
+
     fun isConfiguredSecret(value: String?): Boolean {
-        val trimmed = value?.trim()
-        return !trimmed.isNullOrEmpty() &&
-            !trimmed.startsWith("MY_", ignoreCase = true) &&
-            !trimmed.startsWith("YOUR_", ignoreCase = true) &&
-            !trimmed.equals("null", ignoreCase = true) &&
-            !trimmed.equals("PLACEHOLDER", ignoreCase = true)
+        return normalizeSecret(value) != null
     }
 
     fun hasValidTmdbCredentials(): Boolean {
@@ -118,17 +127,17 @@ object NetworkModule {
                     .header("User-Agent", DEFAULT_USER_AGENT)
 
                 when {
-                    host.contains("hoshika.app") -> {
-                        val clientId = runCatching { BuildConfig.HOSHIKA_CLIENT_ID }.getOrNull()
-                        if (isConfiguredSecret(clientId)) {
-                            builder.header("X-Client-Id", clientId!!)
+                    host == "hoshika.app" || host.endsWith(".hoshika.app") -> {
+                        val clientId = normalizeSecret(runCatching { BuildConfig.HOSHIKA_CLIENT_ID }.getOrNull())
+                        if (clientId != null) {
+                            builder.header("X-Client-Id", clientId)
                         }
                     }
 
-                    host.contains("api.themoviedb.org") -> {
-                        val tmdbSecret = runCatching { BuildConfig.TMDB_API_KEY }.getOrNull()?.trim()
-                        if (isConfiguredSecret(tmdbSecret)) {
-                            if (tmdbSecret!!.startsWith("eyJ") || tmdbSecret.length > 40) {
+                    host == "api.themoviedb.org" -> {
+                        val tmdbSecret = normalizeSecret(runCatching { BuildConfig.TMDB_API_KEY }.getOrNull())
+                        if (tmdbSecret != null) {
+                            if (tmdbSecret.startsWith("eyJ") || tmdbSecret.length > 40) {
                                 builder.header("Authorization", "Bearer $tmdbSecret")
                             } else if (url.queryParameter("api_key") == null) {
                                 url = url.newBuilder()
@@ -139,15 +148,15 @@ object NetworkModule {
                         }
                     }
 
-                    host.contains("fanart.tv") -> {
-                        val fanartSecret = runCatching { BuildConfig.FANART_API_KEY }.getOrNull()?.trim()
+                    host == "webservice.fanart.tv" -> {
+                        val fanartSecret = normalizeSecret(runCatching { BuildConfig.FANART_API_KEY }.getOrNull())
                         val urlBuilder = url.newBuilder()
                         var changed = false
-                        if (isConfiguredSecret(fanartSecret) && url.queryParameter("api_key") == null) {
-                            urlBuilder.addQueryParameter("api_key", fanartSecret!!)
+                        if (fanartSecret != null && url.queryParameter("api_key") == null) {
+                            urlBuilder.addQueryParameter("api_key", fanartSecret)
                             changed = true
                         }
-                        if (url.queryParameter("source") == null) {
+                        if (url.encodedPath.contains("/tv/") && url.queryParameter("source") == null) {
                             urlBuilder.addQueryParameter("source", "tmdb")
                             changed = true
                         }
@@ -161,6 +170,37 @@ object NetworkModule {
                 chain.proceed(builder.build())
             }
             .addInterceptor(BoundedRetryInterceptor(maxRetries = 1, initialDelayMs = 150L))
+            .build()
+    }
+
+    /**
+     * Dedicated OkHttpClient for Coil artwork downloads (TMDB `image.tmdb.org`, Fanart `assets.fanart.tv`,
+     * Hoshika, and AniList CDNs). Reuses the warm connection pool, sends a clean browser-compatible User-Agent,
+     * upgrades cleartext `http://` CDN URLs to `https://` for Android 9+ NetworkSecurityPolicy compliance,
+     * and never attaches API credentials to CDN image requests.
+     */
+    val imageOkHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectionPool(sharedConnectionPool)
+            .dispatcher(sharedDispatcher)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .retryOnConnectionFailure(true)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .writeTimeout(12, TimeUnit.SECONDS)
+            .addInterceptor { chain ->
+                val original = chain.request()
+                val upgradedUrl = LogoLogger.normalizeSecureArtworkUrl(original.url.toString())
+                val builder = original.newBuilder()
+                    .header("User-Agent", DEFAULT_USER_AGENT)
+                    .header("Accept", "image/avif,image/webp,image/png,image/svg+xml,image/*,*/*;q=0.8")
+                if (upgradedUrl != null && upgradedUrl != original.url.toString()) {
+                    builder.url(upgradedUrl)
+                }
+                chain.proceed(builder.build())
+            }
+            .addInterceptor(BoundedRetryInterceptor(maxRetries = 2, initialDelayMs = 150L))
             .build()
     }
 
@@ -209,12 +249,28 @@ object NetworkModule {
             .create(TmdbApi::class.java)
     }
 
+    val tmdbMovieApi: TmdbMovieApi by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://api.themoviedb.org/3/")
+            .client(okHttpClient)
+            .build()
+            .create(TmdbMovieApi::class.java)
+    }
+
     val fanartApi: FanartApi by lazy {
         Retrofit.Builder()
             .baseUrl("https://webservice.fanart.tv/v3.2/")
             .client(okHttpClient)
             .build()
             .create(FanartApi::class.java)
+    }
+
+    val fanartMovieApi: FanartMovieApi by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://webservice.fanart.tv/v3.2/")
+            .client(okHttpClient)
+            .build()
+            .create(FanartMovieApi::class.java)
     }
 
     val aniSkipApi: AniSkipApi by lazy {
@@ -233,3 +289,4 @@ object NetworkModule {
             .create(`in`.aniscroll.tv.data.remote.AniListGraphQlApi::class.java)
     }
 }
+
