@@ -70,6 +70,7 @@ interface HoshikaApi {
      */
     @GET("discover")
     suspend fun getDiscover(
+        @Query("offset") offset: Int? = null,
         @Query("locale") locale: String = "en"
     ): Response<ResponseBody>
 

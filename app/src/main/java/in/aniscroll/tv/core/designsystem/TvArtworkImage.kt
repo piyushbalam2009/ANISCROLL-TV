@@ -121,13 +121,15 @@ fun TvArtworkImage(
         }
     }
 
+    val loadingBrush = rememberMonochromeShimmerBrush()
+
     Box(modifier = modifier) {
         if (request != null && activeUrl != null) {
             if (!isLoaded) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(loadingColor)
+                        .background(loadingBrush)
                 )
             }
             key(activeUrl) {

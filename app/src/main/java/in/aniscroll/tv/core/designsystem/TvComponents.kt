@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -247,6 +248,11 @@ fun TvAnimePosterCard(
         }
     }
 
+    val cardScale by animateFloatAsState(
+        targetValue = if (isFocused) 1.045f else 1.0f,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "poster_card_scale"
+    )
     val context = LocalContext.current
     val deviceProfile = remember(context) { TvDeviceCapabilities.getDeviceProfile(context) }
 
@@ -255,6 +261,10 @@ fun TvAnimePosterCard(
     Column(
         modifier = modifier
             .width(cardWidth)
+            .graphicsLayer {
+                scaleX = cardScale
+                scaleY = cardScale
+            }
             .then(focusMod)
             .onKeyEvent { event ->
                 if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN &&
@@ -282,13 +292,14 @@ fun TvAnimePosterCard(
                 .clip(RoundedCornerShape(4.dp))
                 .background(TvColors.CardBackground)
                 .border(
-                    width = 1.5.dp,
+                    width = if (isFocused) 2.dp else 1.dp,
                     color = if (isFocused) TvColors.FocusOutline else TvColors.Divider,
                     shape = RoundedCornerShape(4.dp)
                 )
         ) {
             TvArtworkImage(
                 primaryUrl = anime.posterUrl,
+                fallbackUrl = anime.bannerUrl,
                 artworkType = ArtworkType.POSTER,
                 screenName = "PosterCard",
                 hoshikaId = anime.hoshikaId,
@@ -324,9 +335,39 @@ fun TvAnimePosterCard(
                 }
             }
 
-            // Optional status / episode badge at top-right
+            // Optional monochrome rating pill at top-left
+            val normalizedRating = anime.rating?.takeIf { it > 0.0 }?.let { raw ->
+                if (raw > 10.0) raw / 10.0 else raw
+            }
+            if (normalizedRating != null) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(4.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(TvColors.MainBackground.copy(alpha = 0.85f))
+                        .border(0.5.dp, TvColors.Divider, RoundedCornerShape(3.dp))
+                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = null,
+                        tint = TvColors.PrimaryText,
+                        modifier = Modifier.size(10.dp)
+                    )
+                    Text(
+                        text = String.format(java.util.Locale.US, "%.1f", normalizedRating),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TvColors.PrimaryText
+                    )
+                }
+            }
+
+            // Optional format / episode badge at top-right
             val badgeText = subtitleBadge
-                ?: anime.format?.takeIf { it.isNotBlank() }
+                ?: anime.format?.takeIf { it.isNotBlank() }?.replace("_", " ")
                 ?: anime.releaseYear?.toString()
             if (!badgeText.isNullOrBlank()) {
                 Box(
@@ -341,7 +382,8 @@ fun TvAnimePosterCard(
                     Text(
                         text = badgeText,
                         style = MaterialTheme.typography.labelSmall,
-                        color = TvColors.PrimaryText
+                        color = TvColors.PrimaryText,
+                        maxLines = 1
                     )
                 }
             }
@@ -370,12 +412,24 @@ fun TvAnimePosterCard(
             overflow = TextOverflow.Ellipsis
         )
 
-        val secondaryLine = buildString {
-            anime.releaseYear?.let { append(it) }
-            if (!anime.status.isNullOrBlank()) {
-                if (isNotEmpty()) append(" • ")
-                append(anime.status)
+        val secondaryLine = remember(anime.releaseYear, anime.totalEpisodes, anime.currentEpisodes, anime.status) {
+            val parts = mutableListOf<String>()
+            anime.releaseYear?.let { parts.add(it.toString()) }
+            val epCount = anime.totalEpisodes?.takeIf { it > 0 } ?: anime.currentEpisodes?.takeIf { it > 0 }
+            if (epCount != null) {
+                parts.add("${epCount} Ep")
             }
+            val compactStatus = when (anime.status?.uppercase(java.util.Locale.ROOT)) {
+                "RELEASING" -> "Airing"
+                "NOT_YET_RELEASED" -> "Upcoming"
+                "FINISHED" -> "Finished"
+                "CANCELLED" -> "Cancelled"
+                else -> anime.status?.takeIf { it.isNotBlank() }
+            }
+            if (compactStatus != null && parts.size < 3) {
+                parts.add(compactStatus)
+            }
+            parts.joinToString(" • ")
         }
         if (secondaryLine.isNotEmpty()) {
             Text(

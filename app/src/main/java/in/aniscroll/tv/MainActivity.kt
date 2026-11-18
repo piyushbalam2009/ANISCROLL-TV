@@ -233,6 +233,13 @@ fun AniScrollTvApp(
                                     viewModel = discoverViewModel,
                                     onOpenAnimeDetails = { id ->
                                         pushRoute(TvScreenRoute.AnimeDetails(id))
+                                    },
+                                    onPlayEpisode = { id, ep, lang ->
+                                        pushRoute(TvScreenRoute.VideoPlayer(id, ep, lang))
+                                    },
+                                    onOpenSearch = {
+                                        currentTab = TvDestination.SEARCH
+                                        pushRoute(TvScreenRoute.MainTab(TvDestination.SEARCH))
                                     }
                                 )
                                 TvDestination.SCHEDULE -> ScheduleScreen(

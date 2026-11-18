@@ -416,6 +416,113 @@ object JsonParsers {
         }.getOrNull()
     }
 
+    data class CatalogPageResult(
+        val items: List<Anime>,
+        val page: Int = 1,
+        val hasMore: Boolean = false,
+        val total: Int? = null
+    )
+
+    data class DiscoverPageResult(
+        val items: List<Anime>,
+        val nextOffset: Int? = null,
+        val hasMore: Boolean = false
+    )
+
+    fun parseCatalogPageFromResponse(rawBody: String, fallbackPage: Int = 1): CatalogPageResult {
+        return runCatching {
+            val trimmed = rawBody.trim()
+            if (trimmed.isEmpty() || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
+                return CatalogPageResult(emptyList(), fallbackPage, hasMore = false)
+            }
+            if (trimmed.startsWith("[")) {
+                val items = parseAnimeListFromResponse(trimmed)
+                return CatalogPageResult(items = items, page = fallbackPage, hasMore = items.size >= 24)
+            }
+            val root = JSONObject(trimmed)
+            if (root.has("ok") && !root.optBoolean("ok", true)) {
+                return CatalogPageResult(emptyList(), fallbackPage, hasMore = false)
+            }
+            val items = parseAnimeListFromResponse(trimmed)
+            val page = root.optInt("page", fallbackPage).takeIf { it > 0 } ?: fallbackPage
+            val total = root.optInt("total", -1).takeIf { it >= 0 }
+            val hasMore = if (root.has("hasMore") && !root.isNull("hasMore")) {
+                root.optBoolean("hasMore", false)
+            } else {
+                items.size >= 24
+            }
+            CatalogPageResult(
+                items = items,
+                page = page,
+                hasMore = hasMore && items.isNotEmpty(),
+                total = total
+            )
+        }.getOrDefault(CatalogPageResult(emptyList(), fallbackPage, hasMore = false))
+    }
+
+    fun parseDiscoverPageFromResponse(rawBody: String): DiscoverPageResult {
+        return runCatching {
+            val trimmed = rawBody.trim()
+            if (trimmed.isEmpty() || !trimmed.startsWith("{")) {
+                val items = parseAnimeListFromResponse(trimmed)
+                return DiscoverPageResult(items = items, nextOffset = items.size, hasMore = items.isNotEmpty())
+            }
+            val root = JSONObject(trimmed)
+            if (root.has("ok") && !root.optBoolean("ok", true)) {
+                return DiscoverPageResult(emptyList(), nextOffset = null, hasMore = false)
+            }
+            val items = parseAnimeListFromResponse(trimmed)
+            val nextOffset = root.optInt("nextOffset", -1).takeIf { it > 0 }
+            val hasMore = if (root.has("hasMore") && !root.isNull("hasMore")) {
+                root.optBoolean("hasMore", false)
+            } else {
+                nextOffset != null && items.isNotEmpty()
+            }
+            DiscoverPageResult(
+                items = items,
+                nextOffset = nextOffset,
+                hasMore = hasMore && items.isNotEmpty()
+            )
+        }.getOrDefault(DiscoverPageResult(emptyList(), nextOffset = null, hasMore = false))
+    }
+
+    fun parseGenresFromResponse(rawBody: String): List<String> {
+        return runCatching {
+            val root = JSONObject(rawBody.trim())
+            if (root.has("ok") && !root.optBoolean("ok", true)) return emptyList()
+            val result = mutableListOf<String>()
+            val genresArr = root.optJSONArray("genres")
+            if (genresArr != null) {
+                for (i in 0 until genresArr.length()) {
+                    genresArr.optString(i).takeCleanString()?.let { result.add(it) }
+                }
+            }
+            if (result.isEmpty()) {
+                val itemsArr = root.optJSONArray("items")
+                if (itemsArr != null) {
+                    for (i in 0 until itemsArr.length()) {
+                        val obj = itemsArr.optJSONObject(i) ?: continue
+                        val label = obj.optCleanString("name") ?: obj.optCleanString("label")
+                        if (label != null) result.add(label)
+                    }
+                }
+            }
+            result.distinct()
+        }.getOrDefault(emptyList())
+    }
+
+    fun parseSeasonLabelFromResponse(rawBody: String): String? {
+        return runCatching {
+            val root = JSONObject(rawBody.trim())
+            val seasonObj = root.optJSONObject("season") ?: return null
+            val rawSeason = seasonObj.optCleanString("season") ?: return null
+            val year = seasonObj.optInt("year", 0).takeIf { it > 1900 }
+            val formattedSeason = rawSeason.lowercase(Locale.ROOT)
+                .replaceFirstChar { it.titlecase(Locale.ROOT) }
+            if (year != null) "$formattedSeason $year" else formattedSeason
+        }.getOrNull()
+    }
+
     data class EpisodePaginationMeta(
         val nextAfter: Int? = null,
         val hasNextPage: Boolean? = null,

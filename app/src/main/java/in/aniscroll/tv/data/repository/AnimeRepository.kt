@@ -43,6 +43,59 @@ data class HomeFeedResult(
     val errorMessage: String? = null
 )
 
+data class DiscoverSectionData(
+    val id: String,
+    val title: String,
+    val subtitle: String? = null,
+    val items: List<Anime>
+)
+
+enum class DiscoverSortKey(val label: String, val apiSortValue: String) {
+    POPULARITY("Popularity", "popular"),
+    RATING("Rating", "score"),
+    NEWEST("Newest", "newest"),
+    TITLE("Title (A-Z)", "popular")
+}
+
+data class DiscoverQueryFilter(
+    val genre: String? = null,
+    val format: String? = null,
+    val year: Int? = null,
+    val status: String? = null,
+    val minRatingOutOf10: Double? = null,
+    val sortBy: DiscoverSortKey = DiscoverSortKey.POPULARITY
+) {
+    val hasActiveFilters: Boolean
+        get() = !genre.isNullOrBlank() ||
+            !format.isNullOrBlank() ||
+            year != null ||
+            !status.isNullOrBlank() ||
+            minRatingOutOf10 != null ||
+            sortBy != DiscoverSortKey.POPULARITY
+
+    val activeFilterCount: Int
+        get() = listOfNotNull(
+            genre?.takeIf { it.isNotBlank() },
+            format?.takeIf { it.isNotBlank() },
+            year?.toString(),
+            status?.takeIf { it.isNotBlank() },
+            minRatingOutOf10?.toString(),
+            sortBy.takeIf { it != DiscoverSortKey.POPULARITY }?.name
+        ).size
+}
+
+data class DiscoverLandingFeed(
+    val heroItems: List<Anime>,
+    val sections: List<DiscoverSectionData>,
+    val genres: List<String>,
+    val seasonLabel: String? = null,
+    val discoverQueueItems: List<Anime> = emptyList(),
+    val discoverNextOffset: Int? = null,
+    val hasMoreDiscover: Boolean = false,
+    val isFromOfflineCache: Boolean = false,
+    val errorMessage: String? = null
+)
+
 sealed class ResourceResult<out T> {
     data class Success<T>(
         val data: T,
@@ -69,6 +122,7 @@ class AnimeRepository(
     }
 
     private val animeMemoryCache = ConcurrentHashMap<Long, TimedCacheEntry<Anime>>()
+    private val fullDetailsFetchedIds = ConcurrentHashMap.newKeySet<Long>()
     private val episodesMemoryCache = ConcurrentHashMap<Long, TimedCacheEntry<List<Episode>>>()
     private val episodePageCache = ConcurrentHashMap<String, TimedCacheEntry<JsonParsers.EpisodePageResult>>()
     private val partialEpisodesCache = ConcurrentHashMap<Long, List<Episode>>()
@@ -357,7 +411,10 @@ class AnimeRepository(
     suspend fun getAnimeDetails(hoshikaId: Long): ResourceResult<Anime> = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         animeMemoryCache[hoshikaId]?.takeIf { now - it.cachedAtMs < ANIME_CACHE_TTL_MS }?.value?.let { mem ->
-            if (!mem.logoUrl.isNullOrBlank() && !mem.format.isNullOrBlank()) {
+            if (hoshikaId in fullDetailsFetchedIds &&
+                !mem.logoUrl.isNullOrBlank() &&
+                !mem.format.isNullOrBlank()
+            ) {
                 return@withContext ResourceResult.Success(mem, isCachedFallback = false)
             }
         }
@@ -444,9 +501,10 @@ class AnimeRepository(
     private suspend fun fetchRemoteAnimeDetails(hoshikaId: Long): Anime? = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         animeMemoryCache[hoshikaId]?.takeIf { now - it.cachedAtMs < ANIME_CACHE_TTL_MS }?.value?.let { mem ->
-            if (!mem.format.isNullOrBlank() &&
+            if (hoshikaId in fullDetailsFetchedIds &&
+                !mem.format.isNullOrBlank() &&
                 mem.preferredTitle.isNotBlank() &&
-                (!mem.englishTitle.isNullOrBlank() || mem.totalEpisodes != null)
+                (!mem.bannerUrl.isNullOrBlank() || !mem.description.isNullOrBlank())
             ) {
                 return@withContext mem
             }
@@ -458,6 +516,7 @@ class AnimeRepository(
         ) ?: return@withContext null
 
         val parsed = JsonParsers.parseSingleAnimeFromResponse(raw) ?: return@withContext null
+        fullDetailsFetchedIds.add(hoshikaId)
         idConverter.cacheMappingIfValid(parsed.hoshikaId, parsed.anilistId)
         animeMemoryCache[hoshikaId] = TimedCacheEntry(parsed, System.currentTimeMillis())
         parsed
@@ -749,6 +808,345 @@ class AnimeRepository(
     }
 
     // --- Discover ---
+    suspend fun getDiscoverLandingFeed(): DiscoverLandingFeed = withContext(Dispatchers.IO) {
+        coroutineScope {
+            val defaultGenres = listOf(
+                "Action", "Adventure", "Comedy", "Drama", "Fantasy", "Horror",
+                "Mystery", "Romance", "Sci-Fi", "Slice of Life", "Sports",
+                "Supernatural", "Thriller", "Isekai"
+            )
+
+            val homeDeferred = async { executeHoshikaGet({ hoshikaApi.getHome() }, "home") }
+            val browseTrendingDeferred = async { executeHoshikaGet({ hoshikaApi.getBrowse(type = "anime", sort = "trending") }, "browse") }
+            val seasonDeferred = async { executeHoshikaGet({ hoshikaApi.getSeason() }, "season") }
+            val browseTopDeferred = async { executeHoshikaGet({ hoshikaApi.getBrowse(type = "anime", sort = "top") }, "browse") }
+            val browseRecentDeferred = async { executeHoshikaGet({ hoshikaApi.getBrowse(type = "anime", sort = "recent") }, "browse") }
+            val topRatedDeferred = async { executeHoshikaGet({ hoshikaApi.getCatalog(type = "anime", sort = "score", page = 1) }, "catalog") }
+            val upcomingDeferred = async { executeHoshikaGet({ hoshikaApi.getCatalog(type = "anime", status = "NOT_YET_RELEASED", sort = "popular", page = 1) }, "catalog") }
+            val discoverDeferred = async { executeHoshikaGet({ hoshikaApi.getDiscover(offset = 0) }, "discover") }
+            val genresDeferred = async { executeHoshikaGet({ hoshikaApi.getGenres() }, "genres") }
+
+            val actionDeferred = async { executeHoshikaGet({ hoshikaApi.getGenreTitles(slug = "action", type = "anime") }, "genre/action") }
+            val adventureDeferred = async { executeHoshikaGet({ hoshikaApi.getGenreTitles(slug = "adventure", type = "anime") }, "genre/adventure") }
+            val romanceDeferred = async { executeHoshikaGet({ hoshikaApi.getGenreTitles(slug = "romance", type = "anime") }, "genre/romance") }
+            val fantasyDeferred = async { executeHoshikaGet({ hoshikaApi.getGenreTitles(slug = "fantasy", type = "anime") }, "genre/fantasy") }
+            val isekaiDeferred = async { executeHoshikaGet({ hoshikaApi.getGenreTitles(slug = "isekai", type = "anime") }, "genre/isekai") }
+            val comedyDeferred = async { executeHoshikaGet({ hoshikaApi.getGenreTitles(slug = "comedy", type = "anime") }, "genre/comedy") }
+            val mysteryDeferred = async { executeHoshikaGet({ hoshikaApi.getGenreTitles(slug = "mystery", type = "anime") }, "genre/mystery") }
+            val thrillerDeferred = async { executeHoshikaGet({ hoshikaApi.getGenreTitles(slug = "thriller", type = "anime") }, "genre/thriller") }
+            val moviesDeferred = async { executeHoshikaGet({ hoshikaApi.getCatalog(type = "anime", format = "MOVIE", sort = "score", page = 1) }, "catalog") }
+            val tvDeferred = async { executeHoshikaGet({ hoshikaApi.getCatalog(type = "anime", format = "TV", sort = "score", page = 1) }, "catalog") }
+
+            // Parse /home sub-arrays
+            var homeTrending = emptyList<Anime>()
+            var homeSeasonal = emptyList<Anime>()
+            var homeRecent = emptyList<Anime>()
+            homeDeferred.await()?.let { raw ->
+                runCatching {
+                    val root = JSONObject(raw.trim())
+                    val dataObj = root.optJSONObject("data") ?: root
+                    fun parseKey(key: String): List<Anime> {
+                        val arr = dataObj.optJSONArray(key) ?: return emptyList()
+                        return buildList {
+                            for (i in 0 until arr.length()) {
+                                val obj = arr.optJSONObject(i) ?: continue
+                                JsonParsers.parseHoshikaAnime(obj)?.let { add(it) }
+                            }
+                        }
+                    }
+                    homeTrending = parseKey("trending").ifEmpty { parseKey("media") }.ifEmpty { parseKey("list") }
+                    homeSeasonal = parseKey("seasonal")
+                    homeRecent = parseKey("recentlyAdded").ifEmpty { parseKey("recently_updated") }
+                }
+            }
+
+            val browseTrending = browseTrendingDeferred.await()?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val seasonRaw = seasonDeferred.await()
+            val seasonLabel = seasonRaw?.let { JsonParsers.parseSeasonLabelFromResponse(it) }
+            val seasonItems = seasonRaw?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val browseTop = browseTopDeferred.await()?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val browseRecent = browseRecentDeferred.await()?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val topRated = topRatedDeferred.await()?.let { JsonParsers.parseCatalogPageFromResponse(it, 1).items }.orEmpty()
+            val upcoming = upcomingDeferred.await()?.let { JsonParsers.parseCatalogPageFromResponse(it, 1).items }
+                .orEmpty()
+                .filter { !it.status.equals("FINISHED", ignoreCase = true) }
+            val discoverPage = discoverDeferred.await()?.let { JsonParsers.parseDiscoverPageFromResponse(it) }
+                ?: JsonParsers.DiscoverPageResult(emptyList(), null, false)
+
+            val apiGenres = genresDeferred.await()?.let { JsonParsers.parseGenresFromResponse(it) }.orEmpty()
+            val genres = (apiGenres + defaultGenres)
+                .filter { it in defaultGenres || apiGenres.contains(it) }
+                .distinct()
+                .let { combined ->
+                    val preferredOrder = defaultGenres.filter { it in combined }
+                    val extras = combined.filter { it !in defaultGenres }
+                    (preferredOrder + extras).ifEmpty { defaultGenres }
+                }
+
+            val actionList = actionDeferred.await()?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val adventureList = adventureDeferred.await()?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val romanceList = romanceDeferred.await()?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val fantasyList = fantasyDeferred.await()?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val isekaiList = isekaiDeferred.await()?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val comedyList = comedyDeferred.await()?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val mysteryList = mysteryDeferred.await()?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val thrillerList = thrillerDeferred.await()?.let { JsonParsers.parseAnimeListFromResponse(it) }.orEmpty()
+            val moviesList = moviesDeferred.await()?.let { JsonParsers.parseCatalogPageFromResponse(it, 1).items }.orEmpty()
+            val tvList = tvDeferred.await()?.let { JsonParsers.parseCatalogPageFromResponse(it, 1).items }.orEmpty()
+
+            fun interleaveUnique(first: List<Anime>, second: List<Anime>, limit: Int = 20): List<Anime> {
+                val out = LinkedHashMap<Long, Anime>()
+                val maxLen = maxOf(first.size, second.size)
+                for (i in 0 until maxLen) {
+                    first.getOrNull(i)?.let { out.putIfAbsent(it.hoshikaId, it) }
+                    second.getOrNull(i)?.let { out.putIfAbsent(it.hoshikaId, it) }
+                    if (out.size >= limit) break
+                }
+                return out.values.take(limit)
+            }
+
+            // Rich hero carousel items: prioritize actual backdrops + synopsis
+            val heroPool = (homeTrending + browseTrending + seasonItems + discoverPage.items + browseTop)
+                .distinctBy { it.hoshikaId }
+            val richHeroes = heroPool
+                .filter { !it.bannerUrl.isNullOrBlank() && !it.description.isNullOrBlank() && it.preferredTitle.isNotBlank() }
+                .take(6)
+            val heroItems = richHeroes.ifEmpty {
+                heroPool.filter { !it.bannerUrl.isNullOrBlank() && it.preferredTitle.isNotBlank() }.take(6)
+            }.ifEmpty {
+                heroPool.filter { it.preferredTitle.isNotBlank() }.take(5)
+            }
+
+            val sections = mutableListOf<DiscoverSectionData>()
+            fun addSection(id: String, title: String, subtitle: String? = null, rawItems: List<Anime>, dedupeAgainst: Set<Long> = emptySet()) {
+                val deduped = rawItems.distinctBy { it.hoshikaId }
+                val curated = if (dedupeAgainst.isNotEmpty()) {
+                    val novel = deduped.filter { it.hoshikaId !in dedupeAgainst }
+                    if (novel.size >= 8) novel else deduped
+                } else {
+                    deduped
+                }.take(20)
+                if (curated.isNotEmpty()) {
+                    sections.add(DiscoverSectionData(id = id, title = title, subtitle = subtitle, items = curated))
+                }
+            }
+
+            val trendingCombined = (homeTrending + browseTrending).distinctBy { it.hoshikaId }
+            val topHeroIdSet = heroItems.take(2).map { it.hoshikaId }.toSet()
+            addSection("trending", "Trending Now", null, trendingCombined)
+            addSection("seasonal", "Popular This Season", seasonLabel, (seasonItems + homeSeasonal).distinctBy { it.hoshikaId })
+            addSection("recently_updated", "Recently Updated", null, (homeRecent + browseRecent).distinctBy { it.hoshikaId })
+            addSection("upcoming", "Upcoming Anime", null, upcoming)
+
+            val topRatedSorted = (topRated.ifEmpty { browseTop })
+                .sortedByDescending { it.rating ?: 0.0 }
+            addSection("top_rated", "Top Rated", null, topRatedSorted, dedupeAgainst = topHeroIdSet)
+            addSection(
+                "most_popular",
+                "Most Popular",
+                null,
+                browseTop,
+                dedupeAgainst = trendingCombined.take(10).map { it.hoshikaId }.toSet()
+            )
+            addSection("action_adventure", "Action & Adventure", null, interleaveUnique(actionList, adventureList))
+            addSection("romance", "Romance", null, romanceList)
+            addSection("fantasy_isekai", "Fantasy & Isekai", null, interleaveUnique(isekaiList, fantasyList))
+            addSection("comedy", "Comedy", null, comedyList)
+            addSection("mystery_thriller", "Mystery & Thriller", null, interleaveUnique(mysteryList, thrillerList))
+            addSection("movies", "Anime Movies", null, moviesList)
+            addSection("tv_series", "TV Series", null, tvList)
+
+            val discoverQueue = discoverPage.items.distinctBy { it.hoshikaId }
+            val allUniqueForCache = (heroItems + sections.flatMap { it.items } + discoverQueue).distinctBy { it.hoshikaId }
+            if (allUniqueForCache.isNotEmpty()) {
+                cacheAnimeBatch(allUniqueForCache)
+                return@coroutineScope DiscoverLandingFeed(
+                    heroItems = heroItems,
+                    sections = sections,
+                    genres = genres,
+                    seasonLabel = seasonLabel,
+                    discoverQueueItems = discoverQueue,
+                    discoverNextOffset = discoverPage.nextOffset ?: discoverQueue.size.takeIf { it > 0 },
+                    hasMoreDiscover = discoverPage.hasMore,
+                    isFromOfflineCache = false,
+                    errorMessage = null
+                )
+            }
+
+            // Offline Room fallback
+            val cached = dao.getRecentCachedAnime(limit = 36).map { it.toDomain() }
+            if (cached.isNotEmpty()) {
+                val cachedHeroes = cached.filter { !it.bannerUrl.isNullOrBlank() }.ifEmpty { cached }.take(5)
+                val cachedSections = buildList {
+                    add(DiscoverSectionData("offline_library", "Cached Discovery", "Offline Mode", cached.take(20)))
+                    val tvCached = cached.filter { it.format.equals("TV", ignoreCase = true) }
+                    if (tvCached.isNotEmpty()) {
+                        add(DiscoverSectionData("offline_tv", "TV Series", null, tvCached.take(20)))
+                    }
+                    val movieCached = cached.filter { it.format.equals("MOVIE", ignoreCase = true) }
+                    if (movieCached.isNotEmpty()) {
+                        add(DiscoverSectionData("offline_movies", "Anime Movies", null, movieCached.take(20)))
+                    }
+                }
+                return@coroutineScope DiscoverLandingFeed(
+                    heroItems = cachedHeroes,
+                    sections = cachedSections,
+                    genres = defaultGenres,
+                    isFromOfflineCache = true,
+                    errorMessage = null
+                )
+            }
+
+            DiscoverLandingFeed(
+                heroItems = emptyList(),
+                sections = emptyList(),
+                genres = defaultGenres,
+                isFromOfflineCache = false,
+                errorMessage = "Unable to connect. Check your internet connection."
+            )
+        }
+    }
+
+    suspend fun loadMoreDiscoverQueue(offset: Int): ResourceResult<JsonParsers.DiscoverPageResult> =
+        withContext(Dispatchers.IO) {
+            val raw = executeHoshikaGet(
+                directCall = { hoshikaApi.getDiscover(offset = offset) },
+                proxyPath = "discover",
+                page = offset
+            )
+            if (raw != null) {
+                val parsed = JsonParsers.parseDiscoverPageFromResponse(raw)
+                cacheAnimeBatch(parsed.items)
+                ResourceResult.Success(parsed)
+            } else {
+                ResourceResult.Error("Unable to load more anime right now.")
+            }
+        }
+
+    suspend fun queryDiscoverCatalog(
+        filter: DiscoverQueryFilter,
+        page: Int = 1
+    ): ResourceResult<JsonParsers.CatalogPageResult> = withContext(Dispatchers.IO) {
+        val effectiveApiSort = when {
+            filter.minRatingOutOf10 != null && filter.sortBy == DiscoverSortKey.POPULARITY -> "score"
+            else -> filter.sortBy.apiSortValue
+        }
+
+        val catalogRaw = executeHoshikaGet(
+            directCall = {
+                hoshikaApi.getCatalog(
+                    type = "anime",
+                    genre = filter.genre?.takeIf { it.isNotBlank() },
+                    format = filter.format?.takeIf { it.isNotBlank() },
+                    status = filter.status?.takeIf { it.isNotBlank() },
+                    year = filter.year,
+                    sort = effectiveApiSort,
+                    page = page
+                )
+            },
+            proxyPath = "catalog",
+            genre = filter.genre,
+            page = page
+        )
+
+        var parsedPage = catalogRaw?.let { JsonParsers.parseCatalogPageFromResponse(it, fallbackPage = page) }
+
+        // Fallback to /genre/{slug} on page 1 if /catalog is empty/unavailable during genre-only browsing
+        if ((parsedPage == null || parsedPage.items.isEmpty()) &&
+            page == 1 &&
+            !filter.genre.isNullOrBlank() &&
+            filter.format == null &&
+            filter.year == null &&
+            filter.status == null
+        ) {
+            val slug = filter.genre.lowercase(java.util.Locale.ROOT).replace(" ", "-")
+            val genreRaw = executeHoshikaGet(
+                directCall = { hoshikaApi.getGenreTitles(slug = slug, type = "anime") },
+                proxyPath = "genre/$slug"
+            )
+            if (genreRaw != null) {
+                val genreItems = JsonParsers.parseAnimeListFromResponse(genreRaw)
+                if (genreItems.isNotEmpty()) {
+                    parsedPage = JsonParsers.CatalogPageResult(
+                        items = genreItems,
+                        page = 1,
+                        hasMore = true,
+                        total = genreItems.size
+                    )
+                }
+            }
+        }
+
+        if (parsedPage != null) {
+            cacheAnimeBatch(parsedPage.items)
+            val filteredItems = applyDiscoverClientFilters(parsedPage.items, filter)
+            return@withContext ResourceResult.Success(
+                parsedPage.copy(items = filteredItems)
+            )
+        }
+
+        // Offline Room fallback for page 1
+        if (page == 1) {
+            val cached = dao.getRecentCachedAnime(limit = 60).map { it.toDomain() }
+            if (cached.isNotEmpty()) {
+                val filtered = applyDiscoverClientFilters(cached, filter)
+                return@withContext ResourceResult.Success(
+                    JsonParsers.CatalogPageResult(
+                        items = filtered,
+                        page = 1,
+                        hasMore = false,
+                        total = filtered.size
+                    ),
+                    isCachedFallback = true
+                )
+            }
+        }
+
+        ResourceResult.Error("Unable to load anime for the selected filters.")
+    }
+
+    private fun applyDiscoverClientFilters(
+        items: List<Anime>,
+        filter: DiscoverQueryFilter
+    ): List<Anime> {
+        val filtered = items.asSequence()
+            .filter { anime ->
+                filter.genre.isNullOrBlank() ||
+                    anime.genres.isEmpty() ||
+                    anime.genres.any { it.equals(filter.genre, ignoreCase = true) }
+            }
+            .filter { anime ->
+                filter.format.isNullOrBlank() ||
+                    anime.format == null ||
+                    anime.format.equals(filter.format, ignoreCase = true)
+            }
+            .filter { anime ->
+                filter.status.isNullOrBlank() ||
+                    anime.status == null ||
+                    anime.status.equals(filter.status, ignoreCase = true)
+            }
+            .filter { anime ->
+                filter.year == null ||
+                    anime.releaseYear == null ||
+                    anime.releaseYear == filter.year
+            }
+            .filter { anime ->
+                val min = filter.minRatingOutOf10 ?: return@filter true
+                val normalized = anime.rating?.takeIf { it > 0.0 }?.let { raw ->
+                    if (raw > 10.0) raw / 10.0 else raw
+                } ?: return@filter false
+                normalized >= min
+            }
+            .toList()
+
+        return when (filter.sortBy) {
+            DiscoverSortKey.TITLE -> filtered.sortedBy { it.preferredTitle.lowercase(java.util.Locale.ROOT) }
+            DiscoverSortKey.RATING -> filtered.sortedByDescending { it.rating ?: -1.0 }
+            DiscoverSortKey.POPULARITY,
+            DiscoverSortKey.NEWEST -> filtered
+        }
+    }
+
     suspend fun getDiscoverAnime(
         category: String,
         genre: String?,
@@ -784,7 +1182,7 @@ class AnimeRepository(
                     )
                 } else {
                     executeHoshikaGet(
-                        directCall = { hoshikaApi.getCatalog(type = "anime", sort = "trending", page = page) },
+                        directCall = { hoshikaApi.getCatalog(type = "anime", sort = "popular", page = page) },
                         proxyPath = "catalog",
                         page = page
                     )
@@ -798,7 +1196,7 @@ class AnimeRepository(
                     )
                 } else {
                     executeHoshikaGet(
-                        directCall = { hoshikaApi.getCatalog(type = "anime", sort = "top", page = page) },
+                        directCall = { hoshikaApi.getCatalog(type = "anime", sort = "score", page = page) },
                         proxyPath = "catalog",
                         page = page
                     )
@@ -812,7 +1210,7 @@ class AnimeRepository(
                     )
                 } else {
                     executeHoshikaGet(
-                        directCall = { hoshikaApi.getCatalog(type = "anime", sort = "recent", page = page) },
+                        directCall = { hoshikaApi.getCatalog(type = "anime", sort = "newest", page = page) },
                         proxyPath = "catalog",
                         page = page
                     )
@@ -919,7 +1317,8 @@ class AnimeRepository(
         incoming: Anime,
         existingAnime: AnimeEntity?,
         existingLogoUrl: String?,
-        existingTmdbId: Long?
+        existingTmdbId: Long?,
+        existingMemory: Anime? = null
     ): Anime {
         val existingEnglish = sanitizeAnimeTitle(existingAnime?.englishTitle)
         val existingRomaji = sanitizeAnimeTitle(existingAnime?.title)
@@ -934,20 +1333,22 @@ class AnimeRepository(
         val resolvedJapanese = incomingJapanese ?: existingJapanese
 
         return incoming.copy(
-            anilistId = incoming.anilistId ?: existingAnime?.anilistId,
+            anilistId = incoming.anilistId ?: existingAnime?.anilistId ?: existingMemory?.anilistId,
             title = resolvedRomaji,
             englishTitle = resolvedEnglish,
             japaneseTitle = resolvedJapanese,
-            description = incoming.description?.takeIf { it.isNotBlank() } ?: existingAnime?.description,
-            posterUrl = incoming.posterUrl?.takeIf { it.isNotBlank() } ?: existingAnime?.posterUrl,
-            bannerUrl = incoming.bannerUrl?.takeIf { it.isNotBlank() } ?: existingAnime?.bannerUrl,
-            logoUrl = incoming.logoUrl ?: existingLogoUrl ?: existingAnime?.logoUrl,
-            tmdbId = incoming.tmdbId ?: existingTmdbId ?: existingAnime?.tmdbId,
-            releaseYear = incoming.releaseYear ?: existingAnime?.releaseYear,
-            season = incoming.season ?: existingAnime?.season,
-            status = incoming.status ?: existingAnime?.status,
-            format = incoming.format ?: existingAnime?.format,
-            totalEpisodes = incoming.totalEpisodes ?: existingAnime?.totalEpisodes
+            description = incoming.description?.takeIf { it.isNotBlank() } ?: existingAnime?.description ?: existingMemory?.description,
+            posterUrl = incoming.posterUrl?.takeIf { it.isNotBlank() } ?: existingAnime?.posterUrl ?: existingMemory?.posterUrl,
+            bannerUrl = incoming.bannerUrl?.takeIf { it.isNotBlank() } ?: existingAnime?.bannerUrl ?: existingMemory?.bannerUrl,
+            logoUrl = incoming.logoUrl ?: existingLogoUrl ?: existingAnime?.logoUrl ?: existingMemory?.logoUrl,
+            tmdbId = incoming.tmdbId ?: existingTmdbId ?: existingAnime?.tmdbId ?: existingMemory?.tmdbId,
+            releaseYear = incoming.releaseYear ?: existingAnime?.releaseYear ?: existingMemory?.releaseYear,
+            season = incoming.season ?: existingAnime?.season ?: existingMemory?.season,
+            status = incoming.status ?: existingAnime?.status ?: existingMemory?.status,
+            format = incoming.format ?: existingAnime?.format ?: existingMemory?.format,
+            totalEpisodes = incoming.totalEpisodes ?: existingAnime?.totalEpisodes ?: existingMemory?.totalEpisodes,
+            currentEpisodes = incoming.currentEpisodes ?: existingMemory?.currentEpisodes,
+            rating = incoming.rating ?: existingMemory?.rating
         )
     }
 
@@ -959,7 +1360,8 @@ class AnimeRepository(
             incoming = anime,
             existingAnime = existingAnime,
             existingLogoUrl = existingLogo?.logoUrl,
-            existingTmdbId = existingLogo?.tmdbId
+            existingTmdbId = existingLogo?.tmdbId,
+            existingMemory = animeMemoryCache[anime.hoshikaId]?.value
         )
         animeMemoryCache[merged.hoshikaId] = TimedCacheEntry(merged, System.currentTimeMillis())
         dao.insertAnime(merged.toEntity())
@@ -968,7 +1370,7 @@ class AnimeRepository(
     private suspend fun cacheAnimeBatch(list: List<Anime>) {
         if (list.isEmpty()) return
         val now = System.currentTimeMillis()
-        val entities = list.map { anime ->
+        val entities = list.distinctBy { it.hoshikaId }.map { anime ->
             idConverter.cacheMappingIfValid(anime.hoshikaId, anime.anilistId)
             val existingAnime = dao.getCachedAnime(anime.hoshikaId)
             val existingLogo = dao.getLogoCache(anime.hoshikaId)?.takeIf { it.validationStatus == "VALID" }
@@ -976,7 +1378,8 @@ class AnimeRepository(
                 incoming = anime,
                 existingAnime = existingAnime,
                 existingLogoUrl = existingLogo?.logoUrl,
-                existingTmdbId = existingLogo?.tmdbId
+                existingTmdbId = existingLogo?.tmdbId,
+                existingMemory = animeMemoryCache[anime.hoshikaId]?.value
             )
             animeMemoryCache[merged.hoshikaId] = TimedCacheEntry(merged, now)
             merged.toEntity()
@@ -1029,19 +1432,22 @@ class AnimeRepository(
     }
 
     private suspend fun resolveWatchProgressItem(entity: WatchHistoryEntity): WatchProgressItem {
+        val cachedAnime = dao.getCachedAnime(entity.hoshikaId)?.toDomain()
         val directTitle = sanitizeAnimeTitle(entity.animeTitle)
             ?.takeIf { !it.startsWith("Anime #") }
         val resolvedTitle = directTitle
-            ?: dao.getCachedAnime(entity.hoshikaId)?.toDomain()?.preferredTitle?.takeIf { it.isNotBlank() }
+            ?: cachedAnime?.preferredTitle?.takeIf { it.isNotBlank() }
             ?: sanitizeAnimeTitle(entity.animeTitle)
             ?: ""
         return WatchProgressItem(
             hoshikaId = entity.hoshikaId,
             anilistId = entity.anilistId,
             animeTitle = resolvedTitle,
-            posterUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(entity.posterUrl),
-            bannerUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(entity.bannerUrl),
-            logoUrl = entity.logoUrl,
+            posterUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(entity.posterUrl)
+                ?: `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(cachedAnime?.posterUrl),
+            bannerUrl = `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(entity.bannerUrl)
+                ?: `in`.aniscroll.tv.artwork.LogoLogger.normalizeSecureArtworkUrl(cachedAnime?.bannerUrl),
+            logoUrl = entity.logoUrl ?: cachedAnime?.logoUrl,
             episodeNumber = entity.episodeNumber,
             language = entity.language,
             positionMs = entity.position,

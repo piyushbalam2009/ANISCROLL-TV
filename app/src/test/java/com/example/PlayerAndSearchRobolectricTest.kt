@@ -2946,7 +2946,7 @@ class PlayerAndSearchRobolectricTest {
             return jsonOk(payload)
         }
 
-        override suspend fun getDiscover(locale: String) = jsonOk("""{"ok":true,"items":[]}""")
+        override suspend fun getDiscover(offset: Int?, locale: String) = jsonOk("""{"ok":true,"items":[]}""")
         override suspend fun getAnimeDetails(shortId: Long, locale: String): Response<ResponseBody> {
             if (detailsDelayMs > 0L) delay(detailsDelayMs)
             return jsonOk(detailsJson)
